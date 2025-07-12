@@ -67,14 +67,14 @@ pip install -r requirements.txt
 然后运行脚本，并指定该文件夹的路径：
 
 ```bash
-python smart_pdf_renamer.py /path/to/your/pdfs
+python gemini_pdf_renamer.py /path/to/your/pdfs
 ```
 
 如果你不提供路径，脚本会默认处理当前目录下的 `pdfs_to_rename` 文件夹。
 
 ```bash
 # 默认处理 ./pdfs_to_rename 文件夹
-python smart_pdf_renamer.py
+python gemini_pdf_renamer.py
 ```
 
 脚本会开始处理文件，并显示一个实时更新的进度条。
