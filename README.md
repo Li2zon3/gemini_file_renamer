@@ -21,8 +21,8 @@
 ### 1. 克隆仓库
 
 ```bash
-git clone <你的仓库URL>
-cd <你的仓库目录>
+git clone https://github.com/Li2zon3/gemini_pdf_renamer.git
+cd gemini_pdf_renamer
 ```
 
 ### 2. 安装依赖
