@@ -1,5 +1,8 @@
+beautifulsoup4
+EbookLib
 google-generativeai
-pymupdf
 pathvalidate
+PyMuPDF
+python-docx
 tqdm
 
