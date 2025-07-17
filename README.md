@@ -102,7 +102,7 @@ This is a powerful Python script that leverages the Google Gemini API to intelli
 -   **在 macOS / Linux 上:**
     ```bash
     export FILENAME_TEMPLATE="{authors} - {title} ({publication_date})"
-    python 文件命名-plus.py
+    python gemini_file_renamer.py
     ```
 -   **注意:** 在自定义模板中，像 `publication_date` 这样的字段如果不存在于API返回的元数据中，会导致文件名生成失败。默认模板中的 `{optional}` 占位符则会自动处理空字段。
 
