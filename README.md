@@ -1,6 +1,6 @@
 # gemini_file_renamer
 
-这是一个功能强大的Python脚本，利用 Google Gemini API 批量智能重命名您的本地文档（PDF, EPUB, AZW3, DOCX）。它能自动从文档中提取标题、作者、出版社、出版日期等元数据，并按照您喜欢的方式生成规范、统一的文件名。
+利用免费的 Google Gemini 2.5 Flash (API) 批量智能重命名您的本地文档（PDF, EPUB, AZW3, DOCX）。它能自动从文档中提取标题、作者、出版社、出版日期等元数据，并按照您喜欢的方式生成规范、统一的文件名。
 
 This is a powerful Python script that leverages the Google Gemini API to intelligently batch-rename your local documents (PDF, EPUB, AZW3, DOCX). It automatically extracts metadata such as title, authors, publisher, and publication date from your documents and generates clean, consistent filenames according to your preferences.
 
