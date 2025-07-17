@@ -63,12 +63,12 @@ This is a powerful Python script that leverages the Google Gemini API to intelli
 1.  **对于默认目录 (`./files_to_rename`):**
     在终端中，导航到脚本所在的目录，然后运行：
     ```bash
-    python 文件命名-plus.py
+    python gemini_file_renamer.py
     ```
 
 2.  **对于指定目录:**
     ```bash
-    python "文件命名-plus.py" "/path/to/your/documents"
+    python "gemini_file_renamer.py" "/path/to/your/documents"
     ```
     *(请将 `"/path/to/your/documents"` 替换为您的实际文件路径)*
 
