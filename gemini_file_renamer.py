@@ -21,7 +21,7 @@
 # 3. 将需要重命名的文件放入 `files_to_rename` 文件夹 (或在运行时指定其他文件夹)。
 #
 # 运行:
-# python gemini_renamer_final.py [可选的文件夹路径]
+# python gemini_file_renamer.py [可选的文件夹路径]
 # --------------------------------------------------------------------------------
 
 import os
