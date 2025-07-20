@@ -1,7 +1,8 @@
 # --------------------------------------------------------------------------------
-# gemini_file_renamer 
+# gemini_file_renamer
 #
 # 功能:
+# - ✅ 双模式运行: 支持高效批处理模式 (默认) 和简单的单文件处理模式 (--mode single)。
 # - ✅ 高效批处理: 将多个文件打包进单次API请求，大幅提升处理速度，突破RPM限制。
 # - ✅ 并发控制: 使用Semaphore精确控制并发任务数，保证程序稳定高效。
 # - 智能分批: 根据Token上限自动将文件分批，确保每个文件作为原子单元处理。
@@ -21,7 +22,8 @@
 # 3. 将需要重命名的文件放入 `files_to_rename` 文件夹 (或在运行时指定其他文件夹)。
 #
 # 运行:
-# python gemini_file_renamer.py [可选的文件夹路径]
+# 批处理模式 (默认): python gemini_renamer.py [可选的文件夹路径]
+# 单文件模式: python gemini_renamer.py --mode single [可选的文件夹路径]
 # --------------------------------------------------------------------------------
 
 import os
@@ -72,16 +74,12 @@ def configure_api_keys():
 
 async def switch_and_configure_api(api_key):
     """配置并验证指定的API密钥。"""
-    global MODEL, GENERATION_CONFIG
+    global MODEL
     try:
         genai.configure(api_key=api_key)
         _ = genai.get_model('models/gemini-2.5-flash')
         MODEL = genai.GenerativeModel('models/gemini-2.5-flash')
         MODEL.api_key = api_key # 自定义属性，用于日志记录
-        
-        # 为模型配置批处理的JSON Schema
-        GENERATION_CONFIG = {"response_mime_type": "application/json", "response_schema": JSON_SCHEMA_BATCH}
-
         logging.info(f"API 密钥 (前8位: {api_key[:8]}...) 配置成功。")
         return True
     except Exception as e:
@@ -89,18 +87,18 @@ async def switch_and_configure_api(api_key):
         return False
 
 
-# --- 2. 全局常量与模型定义 (批处理版) ---
+# --- 2. 全局常量与模型定义 ---
 RPM_LIMIT = 10
 TPM_LIMIT = 250000
 DAILY_REQUEST_LIMIT = 250
-MAX_TOKENS_PER_BATCH = 28000 # 单个批处理请求的安全Token上限
+MAX_TOKENS_PER_REQUEST = 28000 # 单个请求（批处理或单文件）的安全Token上限
 CONCURRENCY_LIMIT = 10 # 并发任务数
 MAX_RETRIES = 3
 
 SUPPORTED_EXTENSIONS = ['.pdf', '.epub', '.azw3', '.docx']
 MODEL = None
 
-# 为批处理设计的Prompt和JSON Schema
+# --- Prompts and JSON Schemas ---
 API_PROMPT_INSTRUCTION_BATCH = """
 Analyze the following text, which contains MULTIPLE documents concatenated together.
 Each document starts with a "--- START OF FILE: [filename] ---" marker and ends with an "--- END OF FILE: [filename] ---" marker.
@@ -108,6 +106,12 @@ For EACH document provided, extract its metadata and create a corresponding JSON
 Return a single JSON array (a list) containing all the extracted JSON objects.
 The order of objects in the final list MUST match the order of the documents in the input text.
 Do not add any commentary. Only return the JSON array.
+"""
+
+API_PROMPT_INSTRUCTION_SINGLE = """
+Analyze the text from the following document to extract its metadata.
+Based on the content, provide a JSON object with the following details.
+Do not add any commentary. Only return the JSON object.
 """
 
 SINGLE_OBJECT_SCHEMA = {
@@ -129,8 +133,6 @@ JSON_SCHEMA_BATCH = {
     "type": "array",
     "items": SINGLE_OBJECT_SCHEMA
 }
-
-GENERATION_CONFIG = {} # 将在 switch_and_configure_api 中被动态赋值
 
 # --- 3. 速率控制器 ---
 class RateLimiter:
@@ -168,30 +170,30 @@ class RateLimiter:
 
 # --- 4. 核心异步功能函数 ---
 async def process_batch(batch, batch_tokens, limiter, pbar, semaphore):
-    """异步处理单个批次的文件，并使用Semaphore控制并发。"""
+    """(批处理模式) 异步处理单个批次的文件，并使用Semaphore控制并发。"""
     async with semaphore:
         if not batch or MODEL is None:
             pbar.update(len(batch))
-            return False, []
+            return {"success": False, "failed_items": batch, "quota_exceeded": False}
 
         prompt_parts = [API_PROMPT_INSTRUCTION_BATCH]
         for item in batch:
             prompt_parts.append(f"\n\n--- START OF FILE: {item['path'].name} ---\n")
             prompt_parts.append(item['text'])
             prompt_parts.append(f"\n--- END OF FILE: {item['path'].name} ---")
-        
         full_prompt = "".join(prompt_parts)
+        generation_config = {"response_mime_type": "application/json", "response_schema": JSON_SCHEMA_BATCH}
 
         for attempt in range(MAX_RETRIES):
             try:
                 await limiter.wait_for_slot(batch_tokens)
-                response = await MODEL.generate_content_async(full_prompt, generation_config=GENERATION_CONFIG)
+                response = await MODEL.generate_content_async(full_prompt, generation_config=generation_config)
                 results = json.loads(response.text)
 
                 if not isinstance(results, list) or len(results) != len(batch):
                     logging.error(f"批处理返回结果格式错误或数量不匹配。预期 {len(batch)} 个，得到 {len(results)} 个。跳过此批次。")
                     pbar.update(len(batch))
-                    return False, batch
+                    return {"success": False, "failed_items": batch, "quota_exceeded": False}
 
                 for i, info in enumerate(results):
                     original_item = batch[i]
@@ -199,17 +201,18 @@ async def process_batch(batch, batch_tokens, limiter, pbar, semaphore):
                     rename_file(original_item['path'], new_name)
 
                 pbar.update(len(batch))
-                return True, []
+                return {"success": True, "failed_items": [], "quota_exceeded": False}
 
             except json.JSONDecodeError:
                 logging.error(f"批处理JSON解析失败: API返回: {getattr(response, 'text', 'N/A')[:200]}...")
                 break
             except Exception as e:
                 logging.error(f"处理批次时出错 (尝试 {attempt + 1}/{MAX_RETRIES}): {e}")
-                if "quota" in str(e).lower() or "exceeded" in str(e).lower() or "429" in str(e):
+                is_quota_error = "quota" in str(e).lower() or "exceeded" in str(e).lower() or "429" in str(e)
+                if is_quota_error:
                     logging.warning(f"API密钥 (前8位: {MODEL.api_key[:8]}...) 配额可能已用尽。")
                     pbar.update(len(batch))
-                    return False, batch
+                    return {"success": False, "failed_items": batch, "quota_exceeded": True}
                 if attempt < MAX_RETRIES - 1:
                     await asyncio.sleep(2 ** (attempt + 1))
                 else:
@@ -217,7 +220,49 @@ async def process_batch(batch, batch_tokens, limiter, pbar, semaphore):
                     break
         
         pbar.update(len(batch))
-        return False, batch
+        return {"success": False, "failed_items": batch, "quota_exceeded": False}
+
+async def process_single_file(file_item, limiter, pbar):
+    """(单文件模式) 异步处理单个文件。"""
+    if not file_item or MODEL is None:
+        pbar.update(1)
+        return {"success": False, "failed_item": file_item, "quota_exceeded": False}
+
+    prompt_parts = [API_PROMPT_INSTRUCTION_SINGLE, "\n\n", file_item['text']]
+    full_prompt = "".join(prompt_parts)
+    generation_config = {"response_mime_type": "application/json", "response_schema": SINGLE_OBJECT_SCHEMA}
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            await limiter.wait_for_slot(file_item['tokens'])
+            response = await MODEL.generate_content_async(full_prompt, generation_config=generation_config)
+            info = json.loads(response.text)
+            
+            new_name = build_filename(info)
+            rename_file(file_item['path'], new_name)
+            
+            pbar.update(1)
+            return {"success": True, "failed_item": None, "quota_exceeded": False}
+
+        except json.JSONDecodeError:
+            logging.error(f"文件 {file_item['path'].name} 的JSON解析失败: API返回: {getattr(response, 'text', 'N/A')[:200]}...")
+            break
+        except Exception as e:
+            logging.error(f"处理文件 {file_item['path'].name} 时出错 (尝试 {attempt + 1}/{MAX_RETRIES}): {e}")
+            is_quota_error = "quota" in str(e).lower() or "exceeded" in str(e).lower() or "429" in str(e)
+            if is_quota_error:
+                logging.warning(f"API密钥 (前8位: {MODEL.api_key[:8]}...) 配额可能已用尽。")
+                pbar.update(1)
+                return {"success": False, "failed_item": file_item, "quota_exceeded": True}
+            if attempt < MAX_RETRIES - 1:
+                await asyncio.sleep(2 ** (attempt + 1))
+            else:
+                logging.error(f"文件 {file_item['path'].name} 已达到最大重试次数，放弃。")
+                break
+    
+    pbar.update(1)
+    return {"success": False, "failed_item": file_item, "quota_exceeded": False}
+
 
 # --- 5. 辅助函数 ---
 # --- 5a. 每日请求跟踪模块 ---
@@ -301,14 +346,12 @@ def extract_text_from_file(file_path):
         elif extension == '.docx': text_to_extract = _extract_from_docx(file_path)
         else: logging.warning(f"不支持的文件类型: {file_path.name}"); return None
         # 粗略截断，避免单个文件过大。更精细的控制在分批时进行。
-        return text_to_extract[:int(MAX_TOKENS_PER_BATCH * 0.9)] 
+        return text_to_extract[:int(MAX_TOKENS_PER_REQUEST * 0.9)]
     except Exception as e: logging.error(f"提取文本时出错: {file_path.name}, 错误: {e}"); return None
 
 # --- 5c. 文件名构建与重命名模块 ---
-
-# 可以在函数外部或全局定义，方便管理
 JOURNAL_KEYWORDS = [
-    "journal", "review", "proceedings", "transactions", "quarterly", 
+    "journal", "review", "proceedings", "transactions", "quarterly",
     "annals", "bulletin", "magazine", "advances", "letters", "studies"
 ]
 
@@ -318,36 +361,27 @@ def build_filename(info):
         return None
     
     template = os.getenv("FILENAME_TEMPLATE", "{title} - {authors} ({optional})")
-    
     parts = []
     
-    # 对 "null" 字符串的判断
     translator_str = info.get("translators", "").strip()
-    if translator_str and translator_str.lower() != 'null':
-        parts.append(f"{translator_str} 译")
+    if translator_str and translator_str.lower() != 'null': parts.append(f"{translator_str} 译")
 
     editor_str = info.get("editors", "").strip()
     if editor_str and editor_str.lower() != 'null':
-        # 判断是否为期刊，如果不是，才加“编”
         publisher_str = info.get("publisher_or_journal", "").lower()
         is_journal = any(keyword in publisher_str for keyword in JOURNAL_KEYWORDS)
-        if not is_journal:
-            parts.append(f"{editor_str} 编")
+        if not is_journal: parts.append(f"{editor_str} 编")
 
     publisher_or_journal_str = info.get("publisher_or_journal", "").strip()
-    if publisher_or_journal_str and publisher_or_journal_str.lower() != 'null':
-        parts.append(publisher_or_journal_str)
+    if publisher_or_journal_str and publisher_or_journal_str.lower() != 'null': parts.append(publisher_or_journal_str)
 
     journal_volume_issue_str = info.get("journal_volume_issue", "").strip()
-    if journal_volume_issue_str and journal_volume_issue_str.lower() != 'null':
-        parts.append(journal_volume_issue_str)
+    if journal_volume_issue_str and journal_volume_issue_str.lower() != 'null': parts.append(journal_volume_issue_str)
 
     publication_date_str = info.get("publication_date", "").strip()
-    if publication_date_str and publication_date_str.lower() != 'null':
-        parts.append(f"({publication_date_str})")
+    if publication_date_str and publication_date_str.lower() != 'null': parts.append(f"({publication_date_str})")
 
-    if info.get("start_page"):
-        parts.append(f"p{info.get('start_page')}")
+    if info.get("start_page"): parts.append(f"p{info.get('start_page')}")
         
     optional_str = ", ".join(part for part in parts if part)
     
@@ -363,7 +397,6 @@ def build_filename(info):
         logging.error(f"文件名模板格式错误: {e}")
         return None
         
-    # 清理空的括号
     if not optional_str:
         return filename.replace(" ()", "").strip()
     else:
@@ -405,29 +438,26 @@ def save_pending_files(file_paths):
 
 def clear_pending_files_log():
     if PENDING_FILES_LOG.exists():
-        try:
-            PENDING_FILES_LOG.unlink()
-            logging.info("待处理文件日志已清空。")
+        try: PENDING_FILES_LOG.unlink(); logging.info("待处理文件日志已清空。")
         except OSError as e: logging.error(f"无法清空待处理文件日志: {e}")
 
 # --- 5e. 命令行参数解析 ---
 def get_args():
     parser = argparse.ArgumentParser(description="使用Gemini API批量智能重命名文件。", formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("directory", nargs='?', default="./files_to_rename", help="包含待处理文件的目录路径 (默认为: ./files_to_rename)")
+    parser.add_argument("--mode", choices=['batch', 'single'], default='batch', help="选择处理模式:\n'batch': 高效批处理模式 (默认)\n'single': 逐个文件处理模式")
     return parser.parse_args()
 
 
 # --- 6. 主执行逻辑  ---
 async def main():
-    # --- 初始化 ---
     total_start_time = time.time()
-    token_calculation_time = 0
-    api_processing_time = 0
-
     api_keys = configure_api_keys()
     request_tracker = load_request_tracker()
     args = get_args()
     target_directory = Path(args.directory)
+    
+    logging.info(f"运行模式: {'批处理 (Batch)' if args.mode == 'batch' else '单文件 (Single)'}")
 
     if not target_directory.is_dir():
         target_directory.mkdir(exist_ok=True)
@@ -439,21 +469,18 @@ async def main():
     if pending_paths:
         logging.info(f"检测到断点日志，将只处理上次未完成的 {len(pending_paths)} 个文件。")
         files_to_process_paths = [p for p in pending_paths if p.exists()]
-        if len(files_to_process_paths) != len(pending_paths):
-            logging.warning("部分日志中的文件已不存在，将跳过。")
+        if len(files_to_process_paths) != len(pending_paths): logging.warning("部分日志中的文件已不存在，将跳过。")
     else:
         logging.info("未检测到断点日志，将扫描整个目录进行新任务。")
         files_to_process_paths = list(set([p for ext in SUPPORTED_EXTENSIONS for p in target_directory.glob(f"**/*{ext}")]))
 
     if not files_to_process_paths:
         logging.info("待处理文件列表为空，程序结束。")
-        if pending_paths:
-            clear_pending_files_log()
+        if pending_paths: clear_pending_files_log()
         return
 
-    # --- 2. 文本提取、Token计算与分批 ---
-    token_start_time = time.time()
-
+    # --- 2. 文本提取与Token计算 ---
+    prep_start_time = time.time()
     print(f"准备处理 {len(files_to_process_paths)} 个文件。开始提取文本并计算Token...")
     first_usable_key_found = False
     for api_key in api_keys:
@@ -470,87 +497,115 @@ async def main():
         if text:
             try:
                 tokens = await MODEL.count_tokens_async(text)
+                if tokens.total_tokens > MAX_TOKENS_PER_REQUEST:
+                     logging.warning(f"文件 {file_path.name} 的Token数({tokens.total_tokens})过大，已跳过。")
+                     continue
                 all_file_data.append({'path': file_path, 'text': text, 'tokens': tokens.total_tokens})
             except Exception as e:
                 logging.error(f"计算Token时出错 ({file_path.name}): {e}")
 
-    print("文件分批中...")
-    batches_to_process_queue = deque()
-    if all_file_data:
-        current_batch, current_batch_tokens = [], 0
-        for file_item in all_file_data:
-            if file_item['tokens'] > MAX_TOKENS_PER_BATCH:
-                logging.warning(f"文件 {file_item['path'].name} 的Token数({file_item['tokens']})过大，已跳过。")
-                continue
-            if current_batch and current_batch_tokens + file_item['tokens'] > MAX_TOKENS_PER_BATCH:
-                batches_to_process_queue.append((current_batch, current_batch_tokens))
-                current_batch = [file_item]
-                current_batch_tokens = file_item['tokens']
-            else:
-                current_batch.append(file_item)
-                current_batch_tokens += file_item['tokens']
-        if current_batch:
-            batches_to_process_queue.append((current_batch, current_batch_tokens))
-    
-    token_calculation_time = time.time() - token_start_time
-    
-    if not batches_to_process_queue:
-        logging.warning("未能成功创建任何处理批次。")
+    if not all_file_data:
+        logging.warning("未能为任何文件成功提取文本和计算Token。")
         return
-    logging.info(f"已成功将 {len(all_file_data)} 个文件分装成 {len(batches_to_process_queue)} 个批次。")
 
-    # --- 3. 按密钥逐批处理 ---
-    processing_start_time = time.time()
-
+    processing_queue = deque(all_file_data)
+    total_files_to_process = len(processing_queue)
     total_files_processed_this_session = 0
     limiter = RateLimiter(RPM_LIMIT, TPM_LIMIT)
-    semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
-    logging.info(f"将以最大 {CONCURRENCY_LIMIT} 的并发数运行任务。")
-
+    
+    prep_time = time.time() - prep_start_time
+    api_processing_start_time = time.time()
+    
+    # --- 3. 按密钥逐个/逐批处理 ---
     for key_index, api_key in enumerate(api_keys):
-        if not batches_to_process_queue:
-            break
+        if not processing_queue: break
+        
         logging.info(f"\n--- 正在尝试使用 API 密钥 #{key_index + 1} (前8位: {api_key[:8]}...) ---")
-        if not await switch_and_configure_api(api_key):
-            continue
+        if not await switch_and_configure_api(api_key): continue
+        
         requests_made_today = request_tracker["usage"].get(api_key, 0)
         requests_left_today = DAILY_REQUEST_LIMIT - requests_made_today
         if requests_left_today <= 0:
             logging.warning(f"此密钥今日配额已用尽。")
             continue
-        num_batches_to_process = min(len(batches_to_process_queue), requests_left_today)
-        logging.info(f"此密钥可处理 {num_batches_to_process} 个批次。")
         
-        batches_for_this_key = [batches_to_process_queue.popleft() for _ in range(num_batches_to_process)]
-        all_files_in_tasks = [item for batch, _ in batches_for_this_key for item in batch]
-        
-        with tqdm(total=len(all_files_in_tasks), desc=f"密钥 #{key_index+1} 进度") as pbar:
-            tasks = [
-                asyncio.create_task(process_batch(batch, tokens, limiter, pbar, semaphore))
-                for batch, tokens in batches_for_this_key
-            ]
-            results = await asyncio.gather(*tasks)
+        logging.info(f"此密钥今日剩余请求配额: {requests_left_today} 次。")
 
-            failed_batches = []
-            for i, (success, failed_items) in enumerate(results):
-                if not success:
-                    failed_batches.append(batches_for_this_key[i])
-                else:
-                    total_files_processed_this_session += len(batches_for_this_key[i][0])
+        with tqdm(total=total_files_to_process, desc=f"密钥 #{key_index+1} 进度") as pbar:
+            pbar.update(total_files_to_process - len(processing_queue))
             
-            if failed_batches:
-                logging.warning(f"{len(failed_batches)} 个批次处理失败，将它们放回队列。")
-                for item in reversed(failed_batches):
-                    batches_to_process_queue.appendleft(item)
+            if args.mode == 'batch':
+                # --- BATCH MODE LOGIC ---
+                batches_to_process_queue = deque()
+                current_batch, current_batch_tokens = [], 0
+                temp_queue = processing_queue.copy() # 使用副本进行分批计算，不影响主队列
+                
+                while temp_queue:
+                    file_item = temp_queue.popleft()
+                    if current_batch and current_batch_tokens + file_item['tokens'] > MAX_TOKENS_PER_REQUEST:
+                        batches_to_process_queue.append((current_batch, current_batch_tokens))
+                        current_batch, current_batch_tokens = [file_item], file_item['tokens']
+                    else:
+                        current_batch.append(file_item)
+                        current_batch_tokens += file_item['tokens']
+                if current_batch: batches_to_process_queue.append((current_batch, current_batch_tokens))
 
-        request_tracker["usage"][api_key] = requests_made_today + num_batches_to_process
+                logging.info(f"待处理文件已分装成 {len(batches_to_process_queue)} 个批次。")
+                
+                num_batches_to_process = min(len(batches_to_process_queue), requests_left_today)
+                if num_batches_to_process == 0 and len(batches_to_process_queue) > 0: continue
+
+                # 从主队列中获取文件以创建实际任务
+                batches_for_this_key = []
+                for _ in range(num_batches_to_process):
+                    batch_info, batch_tokens = batches_to_process_queue.popleft()
+                    current_task_batch = [processing_queue.popleft() for _ in range(len(batch_info))]
+                    batches_for_this_key.append((current_task_batch, batch_tokens))
+
+                semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
+                tasks = [asyncio.create_task(process_batch(b, t, limiter, pbar, semaphore)) for b, t in batches_for_this_key]
+                results = await asyncio.gather(*tasks)
+
+                requests_attempted = 0
+                for i, res in enumerate(results):
+                    requests_attempted += 1
+                    if res["success"]:
+                        total_files_processed_this_session += len(batches_for_this_key[i][0])
+                    else:
+                        for failed_item in reversed(res["failed_items"]): processing_queue.appendleft(failed_item)
+                    if res["quota_exceeded"]:
+                        logging.warning("因配额耗尽，提前中止使用当前密钥。")
+                        break
+                request_tracker["usage"][api_key] = requests_made_today + requests_attempted
+
+            else:
+                # --- SINGLE MODE LOGIC ---
+                requests_attempted = 0
+                while requests_left_today > 0 and processing_queue:
+                    file_item = processing_queue.popleft()
+                    requests_attempted += 1
+                    requests_left_today -= 1
+                    
+                    res = await process_single_file(file_item, limiter, pbar)
+                    
+                    if res["success"]:
+                        total_files_processed_this_session += 1
+                    else:
+                        processing_queue.appendleft(res["failed_item"])
+                    
+                    if res["quota_exceeded"]:
+                        logging.warning("因配额耗尽，提前中止使用当前密钥。")
+                        break
+                request_tracker["usage"][api_key] = requests_made_today + requests_attempted
+
         save_request_tracker(request_tracker)
-        logging.info(f"密钥 (前8位: {api_key[:8]}...) 处理完成。今日累计尝试批次: {request_tracker['usage'][api_key]}/{DAILY_REQUEST_LIMIT}。")
+        logging.info(f"密钥 (前8位: {api_key[:8]}...) 处理完成。今日累计尝试请求: {request_tracker['usage'][api_key]}/{DAILY_REQUEST_LIMIT}。")
 
-    api_processing_time = time.time() - processing_start_time
+
+    api_processing_time = time.time() - api_processing_start_time
 
     # --- 4. 结束后保存未完成的文件 ---
-    remaining_files = [item['path'] for batch, _ in batches_to_process_queue for item in batch]
+    remaining_files = [item['path'] for item in processing_queue]
     if remaining_files:
         logging.warning(f"所有密钥均已尝试，仍有 {len(remaining_files)} 个文件未处理。")
         save_pending_files(remaining_files)
@@ -565,14 +620,13 @@ async def main():
     print("\n-----------------------------------------------------------------")
     print("运行结束！")
     print(f"本次运行共成功处理了 {total_files_processed_this_session} 个文件。")
-    if remaining_files:
-        print(f"仍有 {len(remaining_files)} 个文件在队列中未处理。")
+    if remaining_files: print(f"仍有 {len(remaining_files)} 个文件在队列中未处理。")
     
     print("\n--- 耗时分析 ---")
-    print(f"准备阶段 (文本提取、Token计算、分批) 耗时: {token_calculation_time:.2f} 秒")
+    print(f"准备阶段 (文本提取、Token计算) 耗时: {prep_time:.2f} 秒")
     print(f"API处理阶段 (网络请求、文件重命名) 耗时: {api_processing_time:.2f} 秒")
     print(f"总运行耗时: {total_run_time:.2f} 秒")
-    print(f"平均处理速率: {average_rate:.2f} 文件/秒") 
+    print(f"平均处理速率: {average_rate:.2f} 文件/秒")
 
 if __name__ == "__main__":
     try:
@@ -580,3 +634,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n程序被用户中断。建议重新运行以使用断点续传功能。")
         sys.exit(0)
+
