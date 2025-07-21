@@ -18,6 +18,9 @@ This is a powerful Python script that leverages the Google Gemini API to intelli
 -   **🔒 安全的密钥管理**: 优先从环境变量读取API密钥，避免硬编码带来的安全风险。
 -   **跨平台兼容**: 可在 Windows, macOS, 和 Linux 上运行。
 
+【gemini_file_renamer.py不提供向pdf、epub、docx写入元数据的功能，运行速度较快；
+  gemini_file_renamer_op.py可选择向pdf、epub、docx写入元数据，运行速度较慢】
+
 ## 🔧 环境要求 (Requirements)
 
 -   Python 3.8+
