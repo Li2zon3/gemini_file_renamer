@@ -1,0 +1,146 @@
+# GitHub Actions workflow for building cross-platform releases
+# 用于跨平台构建的 GitHub Actions 工作流
+# 
+# Place this file at: .github/workflows/build.yml
+# 将此文件放置于: .github/workflows/build.yml
+
+name: Build Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:  # Allow manual trigger / 允许手动触发
+
+env:
+  APP_NAME: GeminiRenamer
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install google-generativeai pymupdf pathvalidate python-docx EbookLib beautifulsoup4
+      
+      - name: Build EXE
+        run: |
+          pyinstaller --onefile --windowed --name=${{ env.APP_NAME }} `
+            --hidden-import=google.generativeai `
+            --hidden-import=google.ai.generativelanguage `
+            --hidden-import=google.api_core `
+            --hidden-import=google.auth `
+            --hidden-import=pymupdf `
+            --hidden-import=fitz `
+            --hidden-import=docx `
+            --hidden-import=ebooklib `
+            --hidden-import=bs4 `
+            --hidden-import=pathvalidate `
+            --hidden-import=PIL `
+            --hidden-import=PIL._tkinter_finder `
+            --collect-submodules=google.generativeai `
+            --collect-submodules=google.ai `
+            --collect-submodules=ebooklib `
+            --exclude-module=matplotlib `
+            --exclude-module=numpy `
+            --exclude-module=pandas `
+            gemini_file_renamer_gui.py
+      
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-Windows
+          path: dist/${{ env.APP_NAME }}.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install google-generativeai pymupdf pathvalidate python-docx EbookLib beautifulsoup4
+      
+      - name: Build macOS App
+        run: |
+          pyinstaller --onefile --windowed --name=${{ env.APP_NAME }} \
+            --osx-bundle-identifier=com.gemini.renamer \
+            --hidden-import=google.generativeai \
+            --hidden-import=google.ai.generativelanguage \
+            --hidden-import=google.api_core \
+            --hidden-import=google.auth \
+            --hidden-import=pymupdf \
+            --hidden-import=fitz \
+            --hidden-import=docx \
+            --hidden-import=ebooklib \
+            --hidden-import=bs4 \
+            --hidden-import=pathvalidate \
+            --collect-submodules=google.generativeai \
+            --collect-submodules=google.ai \
+            --collect-submodules=ebooklib \
+            --exclude-module=matplotlib \
+            --exclude-module=numpy \
+            --exclude-module=pandas \
+            gemini_file_renamer_gui.py
+      
+      - name: Create DMG
+        run: |
+          # Create a folder for DMG contents
+          mkdir -p dmg_contents
+          cp -R "dist/${{ env.APP_NAME }}.app" dmg_contents/
+          
+          # Create Applications symlink
+          ln -s /Applications dmg_contents/Applications
+          
+          # Create DMG
+          hdiutil create -volname "${{ env.APP_NAME }}" \
+            -srcfolder dmg_contents \
+            -ov -format UDZO \
+            "dist/${{ env.APP_NAME }}.dmg"
+      
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-macOS
+          path: dist/${{ env.APP_NAME }}.dmg
+
+  release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/${{ env.APP_NAME }}-Windows/${{ env.APP_NAME }}.exe
+            artifacts/${{ env.APP_NAME }}-macOS/${{ env.APP_NAME }}.dmg
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
