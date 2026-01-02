@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+Gemini File Renamer - 命令行版本
+使用 Gemini API 批量智能重命名文件并写入元数据
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -6,6 +12,7 @@ import logging
 import os
 import sys
 import time
+import platform
 from abc import ABC, abstractmethod
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -28,6 +35,7 @@ from typing import (
     Tuple,
     TypeVar,
 )
+from urllib.request import getproxies
 import argparse
 
 # 第三方库
@@ -38,6 +46,192 @@ from docx import Document
 from ebooklib import ITEM_DOCUMENT, epub
 from pathvalidate import sanitize_filename
 from tqdm.asyncio import tqdm
+
+
+# ============================================================================
+# 代理检测模块
+# ============================================================================
+
+class ProxyDetector:
+    """系统代理检测器"""
+    
+    @staticmethod
+    def get_windows_proxy() -> Optional[str]:
+        """从 Windows 注册表获取系统代理设置"""
+        if platform.system() != 'Windows':
+            return None
+        
+        try:
+            import winreg
+            
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r'Software\Microsoft\Windows\CurrentVersion\Internet Settings',
+                0,
+                winreg.KEY_READ
+            )
+            
+            try:
+                proxy_enable, _ = winreg.QueryValueEx(key, 'ProxyEnable')
+                if not proxy_enable:
+                    return None
+                
+                proxy_server, _ = winreg.QueryValueEx(key, 'ProxyServer')
+                
+                if proxy_server:
+                    if '=' in proxy_server:
+                        for part in proxy_server.split(';'):
+                            if part.startswith('http=') or part.startswith('https='):
+                                addr = part.split('=', 1)[1]
+                                if not addr.startswith('http'):
+                                    addr = f'http://{addr}'
+                                return addr
+                    else:
+                        if not proxy_server.startswith('http'):
+                            proxy_server = f'http://{proxy_server}'
+                        return proxy_server
+                        
+            finally:
+                winreg.CloseKey(key)
+                
+        except (ImportError, OSError, FileNotFoundError):
+            pass
+        
+        return None
+    
+    @staticmethod
+    def get_macos_proxy() -> Optional[str]:
+        """从 macOS 系统偏好设置获取代理"""
+        if platform.system() != 'Darwin':
+            return None
+        
+        try:
+            import subprocess
+            
+            for service in ['Wi-Fi', 'Ethernet', 'USB 10/100/1000 LAN']:
+                try:
+                    result = subprocess.run(
+                        ['networksetup', '-getwebproxy', service],
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    
+                    if result.returncode == 0:
+                        lines = result.stdout.strip().split('\n')
+                        enabled = False
+                        server = None
+                        port = None
+                        
+                        for line in lines:
+                            if 'Enabled: Yes' in line:
+                                enabled = True
+                            elif line.startswith('Server:'):
+                                server = line.split(':', 1)[1].strip()
+                            elif line.startswith('Port:'):
+                                port = line.split(':', 1)[1].strip()
+                        
+                        if enabled and server and port:
+                            return f'http://{server}:{port}'
+                            
+                except subprocess.TimeoutExpired:
+                    continue
+                    
+        except Exception:
+            pass
+        
+        return None
+    
+    @staticmethod
+    def get_env_proxy() -> Optional[str]:
+        """从环境变量获取代理设置"""
+        proxy_vars = [
+            'HTTPS_PROXY', 'https_proxy',
+            'HTTP_PROXY', 'http_proxy',
+            'ALL_PROXY', 'all_proxy',
+        ]
+        
+        for var in proxy_vars:
+            proxy = os.environ.get(var)
+            if proxy:
+                return proxy
+        
+        return None
+    
+    @staticmethod
+    def get_urllib_proxy() -> Optional[str]:
+        """使用 urllib 获取系统代理"""
+        proxies = getproxies()
+        
+        if 'https' in proxies:
+            return proxies['https']
+        if 'http' in proxies:
+            return proxies['http']
+        
+        return None
+    
+    @classmethod
+    def detect(cls) -> Optional[str]:
+        """
+        自动检测系统代理设置
+        按优先级：环境变量 > 系统设置 > urllib
+        """
+        # 1. 环境变量
+        proxy = cls.get_env_proxy()
+        if proxy:
+            return proxy
+        
+        # 2. 操作系统特定检测
+        system = platform.system()
+        
+        if system == 'Windows':
+            proxy = cls.get_windows_proxy()
+            if proxy:
+                return proxy
+        
+        elif system == 'Darwin':
+            proxy = cls.get_macos_proxy()
+            if proxy:
+                return proxy
+        
+        # 3. urllib 通用方法
+        proxy = cls.get_urllib_proxy()
+        if proxy:
+            return proxy
+        
+        return None
+    
+    @classmethod
+    def apply(cls, proxy: Optional[str] = None, auto_detect: bool = True) -> Dict[str, Any]:
+        """
+        将代理设置应用到环境变量
+        
+        返回: {'proxy': 代理地址, 'applied': 是否应用成功}
+        """
+        result = {'proxy': None, 'applied': False}
+        
+        if proxy:
+            proxy_to_use = proxy
+        elif auto_detect:
+            proxy_to_use = cls.detect()
+        else:
+            return result
+        
+        if not proxy_to_use:
+            return result
+        
+        result['proxy'] = proxy_to_use
+        
+        # 设置环境变量
+        os.environ['HTTP_PROXY'] = proxy_to_use
+        os.environ['HTTPS_PROXY'] = proxy_to_use
+        os.environ['http_proxy'] = proxy_to_use
+        os.environ['https_proxy'] = proxy_to_use
+        os.environ['GRPC_PROXY'] = proxy_to_use
+        
+        result['applied'] = True
+        return result
+
 
 # ============================================================================
 # 配置模块
@@ -75,7 +269,6 @@ class Config:
         return int(self.max_tokens_per_request * self.chars_per_token)
 
 
-# 使用默认配置初始化（可通过依赖注入替换）
 CONFIG = Config()
 
 
@@ -347,7 +540,6 @@ class GeminiModel:
         return response.text
 
 
-# 全局模型实例
 MODEL = GeminiModel()
 
 
@@ -382,11 +574,9 @@ class RateLimiter:
         rpm_wait = 0.0
         tpm_wait = 0.0
         
-        # RPM 限制检查
         if len(self._request_timestamps) >= self._rpm and self._request_timestamps:
             rpm_wait = (self._request_timestamps[0] + 60) - now
         
-        # TPM 限制检查
         if (self._token_total + tokens_needed) > self._tpm and self._token_records:
             tokens_to_free = (self._token_total + tokens_needed) - self._tpm
             freed = 0
@@ -576,7 +766,6 @@ def extract_and_count(path: Path, config: Config) -> Optional[FileItem]:
 # 元数据处理
 # ============================================================================
 
-# 关键词常量
 JOURNAL_KEYWORDS = frozenset([
     "journal", "review", "proceedings", "transactions", "quarterly",
     "annals", "bulletin", "magazine", "advances", "letters", "studies",
@@ -692,13 +881,7 @@ class MetadataBuilder:
         return " | ".join(details)
     
     def build_filename(self) -> Optional[str]:
-        """构建文件名
-        
-        引注规范：
-        - 有作者时：显示作者，不显示编者（因为引注以作者为准）
-        - 无作者时（集合作品）：显示编者
-        - 译者始终显示（如有）
-        """
+        """构建文件名"""
         if not self.title:
             return None
         
@@ -708,10 +891,8 @@ class MetadataBuilder:
         if self.translators:
             extras.append(f"{self.translators} 译")
         
-        # 只有在没有作者的情况下才添加编者（集合作品/汇编作品）
         if self.editors and not self.authors:
             pub_lower = self.publisher.lower()
-            # 期刊类出版物不需要编者
             if not any(k in pub_lower for k in JOURNAL_KEYWORDS):
                 extras.append(f"{self.editors} 编")
         
@@ -794,7 +975,6 @@ class EPUBMetadataWriter(MetadataWriter):
             for author in builder.authors:
                 book.add_author(author)
             
-            # 构建描述
             description_parts = []
             details = builder.build_details_string()
             if details:
@@ -850,22 +1030,18 @@ class FileRenamer:
             logger.warning(f"无法构建文件名: {path.name}")
             return
         
-        # 清理文件名
         safe_name = sanitize_filename(new_name).strip()
         if not safe_name or safe_name in {".", ".."}:
             logger.warning(f"非法文件名: {new_name}")
             return
         
-        # 构建新路径
         new_path = path.with_name(f"{safe_name}{path.suffix}")
         
-        # 处理重名
         counter = 1
         while new_path.exists() and new_path != path:
             new_path = path.with_name(f"{safe_name}_{counter}{path.suffix}")
             counter += 1
         
-        # 执行重命名
         if new_path != path:
             try:
                 path.rename(new_path)
@@ -874,7 +1050,6 @@ class FileRenamer:
                 logger.error(f"重命名失败 {path.name}: {e}")
                 return
         
-        # 写入元数据
         if self._write_metadata:
             await self._write_metadata_async(new_path, builder)
     
@@ -1001,7 +1176,6 @@ class FileProcessor:
             pbar.update(len(batch.items))
             return BatchResult(success=False, failed_items=batch.items)
         
-        # 构建 prompt
         parts = [PROMPTS['batch']]
         for item in batch.items:
             parts.extend([
@@ -1024,7 +1198,6 @@ class FileProcessor:
                     pbar.update(len(batch.items))
                     return BatchResult(success=False, failed_items=batch.items)
                 
-                # 处理每个文件
                 for item, info in zip(batch.items, results):
                     await self._renamer.process(item.path, info)
                 
@@ -1124,26 +1297,22 @@ class Application:
         """运行应用"""
         start_time = time.time()
         
-        # 初始化 API 密钥
         api_keys = configure_api_keys()
         self._key_manager = APIKeyManager(api_keys, self._config.tracker_file)
         
         logger.info(f"运行模式: {'批处理' if self._mode == ProcessingMode.BATCH else '单文件'}")
         logger.info(f"元数据写入: {'开启' if self._write_metadata else '关闭'}")
         
-        # 确保目标目录存在
         if not self._target_dir.is_dir():
             self._target_dir.mkdir(exist_ok=True)
             logger.info(f"已创建目录: {self._target_dir}")
             return
         
-        # 获取待处理文件
         file_paths = self._get_files_to_process()
         if not file_paths:
             logger.info("没有待处理的文件。")
             return
         
-        # 准备阶段
         prep_start = time.time()
         file_items = await self._prepare_files(file_paths)
         self._stats.prep_time = time.time() - prep_start
@@ -1152,12 +1321,10 @@ class Application:
             logger.warning("未能提取任何文件内容。")
             return
         
-        # 处理阶段
         api_start = time.time()
         remaining = await self._process_files(file_items)
         self._stats.api_time = time.time() - api_start
         
-        # 保存状态
         if remaining:
             self._pending_manager.save([item.path for item in remaining])
             logger.warning(f"剩余 {len(remaining)} 个文件未处理。")
@@ -1183,7 +1350,6 @@ class Application:
     
     async def _prepare_files(self, paths: List[Path]) -> List[FileItem]:
         """准备文件：提取文本和计算 token"""
-        # 先配置一个可用的 API 密钥用于计算 token
         for key in self._key_manager.keys:
             if MODEL.configure(key):
                 break
@@ -1226,7 +1392,6 @@ class Application:
             if not MODEL.configure(api_key):
                 continue
             
-            # 检查配额
             quota = self._key_manager.get_remaining_quota(
                 api_key, self._config.daily_request_limit
             )
@@ -1236,7 +1401,6 @@ class Application:
             
             logger.info(f"剩余配额: {quota}")
             
-            # 处理
             current_items = list(remaining)
             remaining = deque()
             
@@ -1270,7 +1434,6 @@ class Application:
         
         remaining: Deque[FileItem] = deque()
         
-        # 受配额限制的批次
         batches_to_process = batches[:quota]
         leftover_batches = batches[quota:]
         
@@ -1317,7 +1480,6 @@ class Application:
                 if result.failed_item:
                     remaining.append(result.failed_item)
                 if result.quota_exceeded:
-                    # 将剩余项添加到队列
                     idx = items.index(item)
                     remaining.extend(items[idx + 1:])
                     break
@@ -1368,12 +1530,44 @@ def parse_args() -> argparse.Namespace:
         help="禁用元数据写入"
     )
     
+    # ===== 代理相关参数 =====
+    parser.add_argument(
+        "--proxy",
+        type=str,
+        default=None,
+        help="手动指定代理地址 (如 http://127.0.0.1:7890)"
+    )
+    
+    parser.add_argument(
+        "--no-proxy",
+        action="store_true",
+        help="禁用自动代理检测"
+    )
+    # =========================
+    
     return parser.parse_args()
 
 
 async def main() -> None:
     """主入口"""
     args = parse_args()
+    
+    # ===== 代理设置 =====
+    if not args.no_proxy:
+        if args.proxy:
+            logger.info(f"使用手动指定代理: {args.proxy}")
+            result = ProxyDetector.apply(proxy=args.proxy, auto_detect=False)
+        else:
+            logger.info("正在检测系统代理...")
+            result = ProxyDetector.apply(auto_detect=True)
+        
+        if result['applied']:
+            logger.info(f"代理已配置: {result['proxy']}")
+        else:
+            logger.info("未检测到代理，将直接连接")
+    else:
+        logger.info("代理功能已禁用")
+    # ====================
     
     mode = ProcessingMode.BATCH if args.mode == 'batch' else ProcessingMode.SINGLE
     write_metadata = not args.no_metadata
