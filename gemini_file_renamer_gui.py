@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Gemini File Renamer - GUI 版本
+Gemini File Renamer - GUI 版本（带代理支持）
 使用 Gemini API 批量智能重命名文件并写入元数据
 """
 
