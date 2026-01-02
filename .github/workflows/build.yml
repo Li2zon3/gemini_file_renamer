@@ -104,18 +104,26 @@ jobs:
       
       - name: Create DMG
         run: |
-          # Create a folder for DMG contents
-          mkdir -p dmg_contents
-          cp -R "dist/${{ env.APP_NAME }}.app" dmg_contents/
+          # 1. 创建一个足够大的临时空白镜像
+          hdiutil create -size 600m -fs HFS+ -volname "${{ env.APP_NAME }}" -o temp.dmg
           
-          # Create Applications symlink
-          ln -s /Applications dmg_contents/Applications
+          # 2. 挂载这个临时镜像到 /Volumes 下
+          hdiutil attach temp.dmg -readwrite -mountpoint "/Volumes/${{ env.APP_NAME }}"
           
-          # Create DMG
-          hdiutil create -volname "${{ env.APP_NAME }}" \
-            -srcfolder dmg_contents \
-            -ov -format UDZO \
-            "dist/${{ env.APP_NAME }}.dmg"
+          # 3. 把打包好的 App 复制进挂载点
+          cp -R "dist/${{ env.APP_NAME }}.app" "/Volumes/${{ env.APP_NAME }}/"
+          
+          # 4. 创建指向 Applications 文件夹的软链接 (方便用户拖拽安装)
+          ln -s /Applications "/Volumes/${{ env.APP_NAME }}/Applications"
+          
+          # 5. 卸载 (弹出) 镜像
+          hdiutil detach "/Volumes/${{ env.APP_NAME }}"
+          
+          # 6. 将临时镜像转换并压缩为最终的 DMG 文件
+          hdiutil convert temp.dmg -format UDZO -imagekey zlib-level=9 -o "dist/${{ env.APP_NAME }}.dmg"
+          
+          # 7. 清理临时文件
+          rm temp.dmg
       
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
