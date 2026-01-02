@@ -1,1782 +1,1210 @@
-# --------------------------------------------------------------------------------
-# gemini_file_renamer_gui.py
-#
-# Gemini File Renaming Tool with GUI / 带图形界面的 Gemini 文件重命名工具
-# 
-# Features / 功能:
-# - Bilingual UI (Chinese/English) / 双语界面支持
-# - Modern GUI with drag-and-drop folder selection / 现代化图形界面
-# - Dual mode: Batch processing and single file processing / 双模式支持
-# - Real-time progress and log display / 实时显示处理进度和日志
-# - Multiple API key management / 支持多 API 密钥管理
-# - Metadata writing (optional) / 元数据写入功能
-# - Resume from breakpoint / 断点续传支持
-#
-# Dependencies / 依赖安装:
-# pip install google-generativeai pymupdf pathvalidate tqdm python-docx EbookLib beautifulsoup4
-# --------------------------------------------------------------------------------
+# -*- coding: utf-8 -*-
+"""
+Gemini File Renamer - GUI 版本
+使用 Gemini API 批量智能重命名文件并写入元数据
+"""
 
-from __future__ import annotations
-
-import asyncio
-import json
-import logging
 import os
 import sys
-import threading
+import json
 import time
+import asyncio
+import threading
 import queue
-from abc import ABC, abstractmethod
-from collections import deque
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from datetime import date
-from enum import Enum, auto
+import platform
 from pathlib import Path
-from typing import (
-    Any,
-    Callable,
-    Deque,
-    Dict,
-    List,
-    Optional,
-    Sequence,
-    Tuple,
-)
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+from datetime import date
+from collections import deque
+from urllib.request import getproxies
+from bs4 import BeautifulSoup
+import customtkinter as ctk
+from tkinter import filedialog, messagebox
 
-# Third-party libraries / 第三方库
+# --- 依赖库导入 ---
 try:
     import google.generativeai as genai
     import pymupdf
-    from bs4 import BeautifulSoup
     from docx import Document
-    from ebooklib import ITEM_DOCUMENT, epub
+    from ebooklib import epub, ITEM_DOCUMENT
     from pathvalidate import sanitize_filename
 except ImportError as e:
-    print(f"Missing dependency / 缺少必要的依赖: {e}")
-    print("Please run / 请运行: pip install google-generativeai pymupdf pathvalidate python-docx EbookLib beautifulsoup4")
+    class ErrorApp(ctk.CTk):
+        def __init__(self, error_message):
+            super().__init__()
+            self.withdraw()
+            messagebox.showerror("依赖库缺失", f"错误：缺少必要的库: {error_message}\n\n请在终端运行 'pip install google-generativeai pymupdf pathvalidate python-docx EbookLib beautifulsoup4 customtkinter' 进行安装。")
+            self.after(100, self.destroy)
+    app = ErrorApp(e)
+    app.mainloop()
     sys.exit(1)
 
 
-# ============================================================================
-# Internationalization / 国际化模块
-# ============================================================================
+# =======================================================================================
+# SECTION 0: 代理检测模块
+# =======================================================================================
 
-class I18n:
-    """Internationalization support / 国际化支持"""
-    
-    LANGUAGES = {
-        'zh': {
-            'app_title': 'Gemini 智能文件重命名工具',
-            'header_title': '📚 Gemini 智能文件重命名',
-            'header_subtitle': '使用 AI 自动识别文档内容，智能重命名并写入元数据',
-            
-            # API Card
-            'api_card_title': '🔑 API 密钥设置',
-            'api_hint': '输入一个或多个 Google API 密钥（多个密钥用逗号分隔）',
-            'show_key': '👁 显示密钥',
-            'hide_key': '👁 隐藏密钥',
-            
-            # Directory Card
-            'dir_card_title': '📁 选择目录',
-            'browse': '浏览...',
-            'select_dir_hint': '请选择包含待处理文件的目录',
-            'invalid_dir': '请选择有效的目录',
-            'files_found': '找到 {count} 个支持的文件 (PDF, EPUB, AZW3, DOCX)',
-            'no_files_found': '未找到支持的文件',
-            
-            # Options Card
-            'options_card_title': '⚙️ 处理选项',
-            'processing_mode': '处理模式',
-            'batch_mode': '批处理模式（推荐，更高效）',
-            'single_mode': '单文件模式（更稳定）',
-            'other_options': '其他选项',
-            'write_metadata': '写入文件元数据',
-            
-            # Progress
-            'log_title': '📋 处理日志',
-            'ready': '就绪',
-            'progress': '进度: {current}/{total} ({percent:.1f}%)',
-            'preparing': '准备中...',
-            'processing': '正在处理...',
-            
-            # Buttons
-            'start': '🚀 开始处理',
-            'processing_btn': '处理中...',
-            'clear_log': '清除日志',
-            
-            # Messages
-            'error': '错误',
-            'api_key_required': '请输入 API 密钥',
-            'dir_required': '请选择目标目录',
-            'dir_not_exist': '目标目录不存在',
-            'api_keys_found': '找到 {count} 个 API 密钥',
-            'no_valid_keys': '没有有效的 API 密钥',
-            'mode_batch': '批处理',
-            'mode_single': '单文件',
-            'processing_mode_log': '处理模式: {mode}',
-            'metadata_enabled': '开启',
-            'metadata_disabled': '关闭',
-            'metadata_log': '元数据写入: {status}',
-            'resume_from_breakpoint': '从断点恢复: {count} 个文件',
-            'files_to_process': '待处理文件: {count} 个',
-            'no_files_to_process': '没有需要处理的文件',
-            'api_configured': 'API 密钥配置成功',
-            'all_keys_invalid': '所有 API 密钥均无效',
-            'extracting_text': '正在提取文本...',
-            'extracted_files': '成功提取 {count} 个文件',
-            'no_content_extracted': '未能提取任何文件内容',
-            'using_key': '--- 使用密钥 #{idx}/{total} ---',
-            'quota_exhausted': '配额已用尽，跳过',
-            'remaining_quota': '剩余配额: {quota}',
-            'remaining_files': '剩余 {count} 个文件未处理',
-            'completed': '✅ 处理完成！成功处理 {count} 个文件',
-            'processed': '✓ 已处理: {name}',
-            'batch_mismatch': '批处理结果数不匹配',
-            'json_parse_error': 'JSON 解析失败',
-            'batch_error': '批处理错误 (尝试 {attempt}): {error}',
-            'single_error': '处理错误 {name}: {error}',
-            'processing_error': '处理出错: {error}',
-            
-            # Language
-            'language': '🌐 语言',
-            'lang_zh': '中文',
-            'lang_en': 'English',
-        },
-        'en': {
-            'app_title': 'Gemini Smart File Renamer',
-            'header_title': '📚 Gemini Smart File Renamer',
-            'header_subtitle': 'Use AI to automatically recognize document content, rename and write metadata',
-            
-            # API Card
-            'api_card_title': '🔑 API Key Settings',
-            'api_hint': 'Enter one or more Google API keys (separate multiple keys with commas)',
-            'show_key': '👁 Show Key',
-            'hide_key': '👁 Hide Key',
-            
-            # Directory Card
-            'dir_card_title': '📁 Select Directory',
-            'browse': 'Browse...',
-            'select_dir_hint': 'Please select a directory containing files to process',
-            'invalid_dir': 'Please select a valid directory',
-            'files_found': 'Found {count} supported files (PDF, EPUB, AZW3, DOCX)',
-            'no_files_found': 'No supported files found',
-            
-            # Options Card
-            'options_card_title': '⚙️ Processing Options',
-            'processing_mode': 'Processing Mode',
-            'batch_mode': 'Batch Mode (Recommended, more efficient)',
-            'single_mode': 'Single File Mode (More stable)',
-            'other_options': 'Other Options',
-            'write_metadata': 'Write file metadata',
-            
-            # Progress
-            'log_title': '📋 Processing Log',
-            'ready': 'Ready',
-            'progress': 'Progress: {current}/{total} ({percent:.1f}%)',
-            'preparing': 'Preparing...',
-            'processing': 'Processing...',
-            
-            # Buttons
-            'start': '🚀 Start Processing',
-            'processing_btn': 'Processing...',
-            'clear_log': 'Clear Log',
-            
-            # Messages
-            'error': 'Error',
-            'api_key_required': 'Please enter an API key',
-            'dir_required': 'Please select a target directory',
-            'dir_not_exist': 'Target directory does not exist',
-            'api_keys_found': 'Found {count} API keys',
-            'no_valid_keys': 'No valid API keys',
-            'mode_batch': 'Batch',
-            'mode_single': 'Single File',
-            'processing_mode_log': 'Processing mode: {mode}',
-            'metadata_enabled': 'Enabled',
-            'metadata_disabled': 'Disabled',
-            'metadata_log': 'Metadata writing: {status}',
-            'resume_from_breakpoint': 'Resuming from breakpoint: {count} files',
-            'files_to_process': 'Files to process: {count}',
-            'no_files_to_process': 'No files to process',
-            'api_configured': 'API key configured successfully',
-            'all_keys_invalid': 'All API keys are invalid',
-            'extracting_text': 'Extracting text...',
-            'extracted_files': 'Successfully extracted {count} files',
-            'no_content_extracted': 'Failed to extract any file content',
-            'using_key': '--- Using key #{idx}/{total} ---',
-            'quota_exhausted': 'Quota exhausted, skipping',
-            'remaining_quota': 'Remaining quota: {quota}',
-            'remaining_files': '{count} files remaining unprocessed',
-            'completed': '✅ Completed! Successfully processed {count} files',
-            'processed': '✓ Processed: {name}',
-            'batch_mismatch': 'Batch result count mismatch',
-            'json_parse_error': 'JSON parse error',
-            'batch_error': 'Batch error (attempt {attempt}): {error}',
-            'single_error': 'Processing error {name}: {error}',
-            'processing_error': 'Processing error: {error}',
-            
-            # Language
-            'language': '🌐 Language',
-            'lang_zh': '中文',
-            'lang_en': 'English',
-        }
-    }
-    
-    def __init__(self, lang: str = 'zh'):
-        self._lang = lang if lang in self.LANGUAGES else 'zh'
-    
-    @property
-    def lang(self) -> str:
-        return self._lang
-    
-    @lang.setter
-    def lang(self, value: str) -> None:
-        if value in self.LANGUAGES:
-            self._lang = value
-    
-    def get(self, key: str, **kwargs) -> str:
-        """Get translated string with optional formatting"""
-        text = self.LANGUAGES.get(self._lang, {}).get(key, key)
-        if kwargs:
-            try:
-                return text.format(**kwargs)
-            except (KeyError, ValueError):
-                return text
-        return text
-    
-    def toggle(self) -> str:
-        """Toggle between languages and return new language code"""
-        self._lang = 'en' if self._lang == 'zh' else 'zh'
-        return self._lang
-
-
-# ============================================================================
-# Configuration Module / 配置模块
-# ============================================================================
-
-@dataclass(frozen=True)
-class Config:
-    """Immutable global configuration / 不可变的全局配置类"""
-    rpm_limit: int = 10
-    tpm_limit: int = 250_000
-    daily_request_limit: int = 250
-    max_tokens_per_request: int = 27_000
-    concurrency_limit: int = 10
-    max_retries: int = 3
-    max_items_per_batch: int = 12
-    io_workers: int = field(default_factory=lambda: min(32, max(4, (os.cpu_count() or 8) * 2)))
-    chars_per_token: float = 3.5
-    supported_extensions: Tuple[str, ...] = ('.pdf', '.epub', '.azw3', '.docx')
-    pending_files_log: Path = field(default_factory=lambda: Path("./pending_files.txt"))
-    tracker_file: Path = field(default_factory=lambda: Path("./request_tracker.json"))
-    
-    @property
-    def max_chars_per_request(self) -> int:
-        return int(self.max_tokens_per_request * self.chars_per_token)
-
-
-CONFIG = Config()
-
-
-class ProcessingMode(Enum):
-    BATCH = auto()
-    SINGLE = auto()
-
-
-# ============================================================================
-# Prompts and Schema / 提示词和 Schema
-# ============================================================================
-
-PROMPTS = {
-    'batch': """
-Analyze the following text, which contains MULTIPLE documents concatenated together.
-Each document starts with a "--- START OF FILE: [filename] ---" marker and ends with an "--- END OF FILE: [filename] ---" marker.
-For EACH document provided, extract its metadata. Crucially, also extract a list of 3-5 relevant keywords from the document's content.
-Return a single JSON array (a list) containing all the extracted JSON objects.
-The order of objects in the final list MUST match the order of the documents in the input text.
-Do not add any commentary. Only return the JSON array.
-""".strip(),
-    
-    'single': """
-Analyze the text from the following document to extract its metadata.
-Based on the content, provide a JSON object with the following details.
-Crucially, also extract a list of 3-5 relevant keywords from the document's content.
-Do not add any commentary. Only return the JSON object.
-""".strip()
-}
-
-SINGLE_OBJECT_SCHEMA: Dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "title": {"type": "string"},
-        "authors": {"type": "array", "items": {"type": "string"}},
-        "keywords": {"type": "array", "items": {"type": "string"}},
-        "translators": {"type": "string"},
-        "editors": {"type": "string"},
-        "publisher_or_journal": {"type": "string"},
-        "journal_volume_issue": {"type": "string"},
-        "publication_date": {"type": "string"},
-        "start_page": {"type": "integer"}
-    },
-    "required": ["title"]
-}
-
-BATCH_SCHEMA: Dict[str, Any] = {
-    "type": "array",
-    "items": SINGLE_OBJECT_SCHEMA
-}
-
-
-# ============================================================================
-# Data Models / 数据模型
-# ============================================================================
-
-@dataclass
-class FileItem:
-    path: Path
-    text: str
-    tokens: int
-    
-    def __hash__(self) -> int:
-        return hash(self.path)
-
-
-@dataclass
-class BatchResult:
-    success: bool
-    failed_items: List[FileItem] = field(default_factory=list)
-    quota_exceeded: bool = False
-
-
-@dataclass
-class SingleResult:
-    success: bool
-    failed_item: Optional[FileItem] = None
-    quota_exceeded: bool = False
-
-
-@dataclass
-class Batch:
-    items: List[FileItem]
-    tokens: int
-
-
-@dataclass
-class ProcessingStats:
-    total_processed: int = 0
-    total_failed: int = 0
-    prep_time: float = 0.0
-    api_time: float = 0.0
-    
-    @property
-    def total_time(self) -> float:
-        return self.prep_time + self.api_time
-    
-    @property
-    def average_rate(self) -> float:
-        return self.total_processed / self.api_time if self.api_time > 0 else 0.0
-
-
-# ============================================================================
-# GUI Log Handler / GUI 日志处理器
-# ============================================================================
-
-class QueueHandler(logging.Handler):
-    """Handler that sends log messages to a queue / 将日志消息发送到队列的处理器"""
-    
-    def __init__(self, log_queue: queue.Queue):
-        super().__init__()
-        self.log_queue = log_queue
-    
-    def emit(self, record: logging.LogRecord) -> None:
-        self.log_queue.put(self.format(record))
-
-
-# ============================================================================
-# API Key Management / API 密钥管理
-# ============================================================================
-
-class APIKeyManager:
-    def __init__(self, keys: List[str], tracker_file: Path):
-        self._keys = keys
-        self._tracker_file = tracker_file
-        self._tracker = self._load_tracker()
-    
-    def _load_tracker(self) -> Dict[str, Any]:
-        today_str = date.today().isoformat()
-        default = {"date": today_str, "usage": {}}
-        
-        if not self._tracker_file.exists():
-            return default
-            
-        try:
-            with open(self._tracker_file, 'r', encoding='utf-8') as f:
-                tracker = json.load(f)
-            if tracker.get("date") != today_str:
-                return default
-            tracker.setdefault("usage", {})
-            return tracker
-        except (json.JSONDecodeError, IOError):
-            return default
-    
-    def save_tracker(self) -> None:
-        try:
-            with open(self._tracker_file, 'w', encoding='utf-8') as f:
-                json.dump(self._tracker, f, indent=4, ensure_ascii=False)
-        except IOError:
-            pass
-    
-    def get_usage(self, key: str) -> int:
-        return self._tracker["usage"].get(key, 0)
-    
-    def increment_usage(self, key: str) -> None:
-        self._tracker["usage"][key] = self.get_usage(key) + 1
-    
-    @property
-    def keys(self) -> List[str]:
-        return self._keys
-    
-    @property
-    def count(self) -> int:
-        return len(self._keys)
-    
-    def get_remaining_quota(self, key: str, daily_limit: int) -> int:
-        return daily_limit - self.get_usage(key)
-
-
-# ============================================================================
-# Gemini Model / Gemini 模型
-# ============================================================================
-
-class GeminiModel:
-    MODEL_NAME = 'models/gemini-2.5-flash'
-    
-    def __init__(self):
-        self._model: Optional[genai.GenerativeModel] = None
-        self._api_key: Optional[str] = None
-    
-    @property
-    def api_key(self) -> Optional[str]:
-        return self._api_key
-    
-    @property
-    def is_configured(self) -> bool:
-        return self._model is not None
-    
-    def configure(self, api_key: str) -> bool:
-        try:
-            genai.configure(api_key=api_key)
-            self._model = genai.GenerativeModel(self.MODEL_NAME)
-            self._api_key = api_key
-            return True
-        except Exception:
-            return False
-    
-    def count_tokens(self, text: str) -> int:
-        if not self._model:
-            raise RuntimeError("Model not configured / 模型尚未配置")
-        result = self._model.count_tokens(text)
-        return result.total_tokens
-    
-    async def generate_content(self, prompt: str, schema: Dict[str, Any]) -> str:
-        if not self._model:
-            raise RuntimeError("Model not configured / 模型尚未配置")
-        config = {"response_mime_type": "application/json", "response_schema": schema}
-        response = await self._model.generate_content_async(prompt, generation_config=config)
-        return response.text
-
-
-MODEL = GeminiModel()
-
-
-# ============================================================================
-# Rate Limiter / 速率限制器
-# ============================================================================
-
-class RateLimiter:
-    def __init__(self, rpm: int, tpm: int):
-        self._rpm = rpm
-        self._tpm = tpm
-        self._request_timestamps: Deque[float] = deque()
-        self._token_records: Deque[Tuple[float, int]] = deque()
-        self._token_total = 0
-        self._lock = asyncio.Lock()
-    
-    def _cleanup_old_records(self, now: float) -> None:
-        cutoff = now - 60
-        while self._request_timestamps and self._request_timestamps[0] < cutoff:
-            self._request_timestamps.popleft()
-        while self._token_records and self._token_records[0][0] < cutoff:
-            _, tokens = self._token_records.popleft()
-            self._token_total -= tokens
-    
-    def _calculate_wait_time(self, now: float, tokens_needed: int) -> float:
-        rpm_wait = 0.0
-        tpm_wait = 0.0
-        
-        if len(self._request_timestamps) >= self._rpm and self._request_timestamps:
-            rpm_wait = (self._request_timestamps[0] + 60) - now
-        
-        if (self._token_total + tokens_needed) > self._tpm and self._token_records:
-            tokens_to_free = (self._token_total + tokens_needed) - self._tpm
-            freed = 0
-            wait_until = 0.0
-            for ts, tk in self._token_records:
-                freed += tk
-                if freed >= tokens_to_free:
-                    wait_until = ts
-                    break
-            if wait_until > 0:
-                tpm_wait = (wait_until + 60) - now
-        
-        return max(0.1, rpm_wait, tpm_wait)
-    
-    async def acquire(self, tokens_needed: int) -> None:
-        async with self._lock:
-            while True:
-                now = time.time()
-                self._cleanup_old_records(now)
-                
-                if (len(self._request_timestamps) < self._rpm and 
-                    (self._token_total + tokens_needed) <= self._tpm):
-                    self._request_timestamps.append(now)
-                    self._token_records.append((now, tokens_needed))
-                    self._token_total += tokens_needed
-                    return
-                
-                wait_time = self._calculate_wait_time(now, tokens_needed)
-                await asyncio.sleep(wait_time)
-
-
-# ============================================================================
-# Text Extractors / 文本提取器
-# ============================================================================
-
-class TextExtractor(ABC):
-    @abstractmethod
-    def extract(self, path: Path) -> str:
-        pass
-
-
-class PDFExtractor(TextExtractor):
-    def __init__(self, pages_start: int = 4, pages_end: int = 3):
-        self._pages_start = pages_start
-        self._pages_end = pages_end
-    
-    def extract(self, path: Path) -> str:
-        try:
-            with pymupdf.open(path) as doc:
-                total = doc.page_count
-                pages = set(range(min(self._pages_start, total)))
-                if total > self._pages_start + self._pages_end:
-                    pages.update(range(total - self._pages_end, total))
-                texts = [doc[i].get_text(sort=True) for i in sorted(pages)]
-                return "\n".join(texts)
-        except Exception:
-            return ""
-
-
-class EPUBExtractor(TextExtractor):
-    def __init__(self, chapters_start: int = 5, chapters_end: int = 4):
-        self._chapters_start = chapters_start
-        self._chapters_end = chapters_end
-    
-    def extract(self, path: Path) -> str:
-        try:
-            book = epub.read_epub(path)
-            items = list(book.get_items_of_type(ITEM_DOCUMENT))
-            to_process = items[:self._chapters_start]
-            if len(items) > self._chapters_start + self._chapters_end:
-                to_process.extend(items[-self._chapters_end:])
-            texts = []
-            for item in to_process:
-                soup = BeautifulSoup(item.get_body_content(), 'html.parser')
-                texts.append(soup.get_text("\n", strip=True))
-            return "\n\n".join(texts)
-        except Exception:
-            return ""
-
-
-class DOCXExtractor(TextExtractor):
-    def __init__(self, paras_start: int = 20, paras_end: int = 15):
-        self._paras_start = paras_start
-        self._paras_end = paras_end
-    
-    def extract(self, path: Path) -> str:
-        try:
-            doc = Document(path)
-            paras = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-            if len(paras) > self._paras_start + self._paras_end:
-                result = paras[:self._paras_start] + paras[-self._paras_end:]
-            else:
-                result = paras
-            return "\n".join(result)
-        except Exception:
-            return ""
-
-
-class TextExtractorFactory:
-    _extractors: Dict[str, TextExtractor] = {
-        '.pdf': PDFExtractor(),
-        '.epub': EPUBExtractor(),
-        '.azw3': EPUBExtractor(),
-        '.docx': DOCXExtractor(),
-    }
-    
-    @classmethod
-    def get_extractor(cls, extension: str) -> Optional[TextExtractor]:
-        return cls._extractors.get(extension.lower())
-
-
-def smart_truncate(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    head_chars = int(max_chars * 0.6)
-    tail_chars = int(max_chars * 0.4)
-    return f"{text[:head_chars]}\n\n--- Content truncated / 内容已截断 ---\n\n{text[-tail_chars:]}"
-
-
-def extract_text(path: Path, max_chars: int) -> Optional[str]:
-    extractor = TextExtractorFactory.get_extractor(path.suffix)
-    if not extractor:
-        return None
-    text = extractor.extract(path)
-    if not text:
-        return None
-    return smart_truncate(text, max_chars)
-
-
-def extract_and_count(path: Path, config: Config) -> Optional[FileItem]:
-    text = extract_text(path, config.max_chars_per_request)
-    if not text:
-        return None
-    if not MODEL.is_configured:
-        return None
-    try:
-        tokens = MODEL.count_tokens(text)
-        return FileItem(path=path, text=text, tokens=tokens)
-    except Exception:
-        return None
-
-
-# ============================================================================
-# Metadata Processing / 元数据处理
-# ============================================================================
-
-JOURNAL_KEYWORDS = frozenset([
-    "journal", "review", "proceedings", "transactions", "quarterly",
-    "annals", "bulletin", "magazine", "advances", "letters", "studies",
-    "science", "research", "technology", "medicine", "report", "archives",
-    "学报", "法学", "研究", "评论", "科学", "技术", "杂志", "动态",
-    "报告", "医学", "经济", "哲学", "历史", "通讯", "汇刊", "纪要"
-])
-
-UNKNOWN_AUTHOR_MARKERS = frozenset(["作者不详"])
-ROLE_INVALID_TOKENS = frozenset(["null", "none", "n/a", "unknown", "不详", "未知"])
-ROLE_INVALID_SUBSTRINGS = frozenset(["无法提取", "不明确", "系统返回null", "系统返回 null"])
-
-
-class TextNormalizer:
-    @staticmethod
-    def normalize(value: Any) -> str:
-        if value is None:
-            return ""
-        text = str(value).strip()
-        return "" if not text or text.lower() == "null" else text
+class ProxyDetector:
+    """系统代理检测器"""
     
     @staticmethod
-    def normalize_list(values: Optional[List[Any]]) -> List[str]:
-        if not values:
-            return []
-        return [v for v in map(TextNormalizer.normalize, values) if v]
-    
-    @staticmethod
-    def normalize_authors(values: Optional[List[Any]]) -> List[str]:
-        authors = TextNormalizer.normalize_list(values)
-        return [a for a in authors if a not in UNKNOWN_AUTHOR_MARKERS]
-    
-    @staticmethod
-    def normalize_role(value: Any) -> str:
-        normalized = TextNormalizer.normalize(value)
-        if not normalized:
-            return ""
-        lower = normalized.lower()
-        if lower in ROLE_INVALID_TOKENS:
-            return ""
-        compact = normalized.replace(" ", "")
-        for marker in ROLE_INVALID_SUBSTRINGS:
-            if marker in normalized or marker in compact:
-                return ""
-        return normalized
-
-
-class MetadataBuilder:
-    def __init__(self, info: Dict[str, Any]):
-        self._info = info
-        self._normalizer = TextNormalizer
-    
-    @property
-    def title(self) -> str:
-        return self._normalizer.normalize(self._info.get("title"))
-    
-    @property
-    def authors(self) -> List[str]:
-        return self._normalizer.normalize_authors(self._info.get("authors"))
-    
-    @property
-    def authors_str(self) -> str:
-        return "、".join(self.authors)
-    
-    @property
-    def keywords(self) -> List[str]:
-        return self._normalizer.normalize_list(self._info.get("keywords"))
-    
-    @property
-    def keywords_str(self) -> str:
-        return ", ".join(self.keywords)
-    
-    @property
-    def translators(self) -> str:
-        return self._normalizer.normalize_role(self._info.get("translators"))
-    
-    @property
-    def editors(self) -> str:
-        return self._normalizer.normalize_role(self._info.get("editors"))
-    
-    @property
-    def publisher(self) -> str:
-        return self._normalizer.normalize(self._info.get("publisher_or_journal"))
-    
-    def build_details_string(self) -> str:
-        details = []
-        mappings = [
-            ("Publisher/Journal", self.publisher),
-            ("Volume/Issue", self._normalizer.normalize(self._info.get("journal_volume_issue"))),
-            ("Date", self._normalizer.normalize(self._info.get("publication_date"))),
-            ("Editor", self.editors),
-            ("Translator", self.translators),
-            ("Page", self._normalizer.normalize(self._info.get("start_page"))),
-        ]
-        for label, value in mappings:
-            if value:
-                details.append(f"{label}: {value}")
-        return " | ".join(details)
-    
-    def build_filename(self) -> Optional[str]:
-        """Build filename"""
-        if not self.title:
+    def get_windows_proxy():
+        """从 Windows 注册表获取系统代理设置"""
+        if platform.system() != 'Windows':
             return None
         
-        main_part = f"{self.title} - {self.authors_str}" if self.authors_str else self.title
-        
-        extras = []
-        if self.translators:
-            extras.append(f"{self.translators} 译")
-        
-        if self.editors and not self.authors:
-            pub_lower = self.publisher.lower()
-            if not any(k in pub_lower for k in JOURNAL_KEYWORDS):
-                extras.append(f"{self.editors} 编")
-        
-        return f"{main_part} ({', '.join(extras)})" if extras else main_part
-
-
-# ============================================================================
-# Metadata Writers / 元数据写入器
-# ============================================================================
-
-class MetadataWriter(ABC):
-    @abstractmethod
-    def write(self, path: Path, builder: MetadataBuilder) -> None:
-        pass
-
-
-class PDFMetadataWriter(MetadataWriter):
-    def write(self, path: Path, builder: MetadataBuilder) -> None:
         try:
-            with pymupdf.open(path) as doc:
-                metadata = doc.metadata
-                metadata['title'] = builder.title
-                metadata['author'] = builder.authors_str
-                metadata['subject'] = builder.build_details_string()
-                metadata['keywords'] = builder.keywords_str
-                doc.set_metadata(metadata)
-                doc.save(doc.name, incremental=True, encryption=pymupdf.PDF_ENCRYPT_KEEP)
-        except Exception:
+            import winreg
+            
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r'Software\Microsoft\Windows\CurrentVersion\Internet Settings',
+                0,
+                winreg.KEY_READ
+            )
+            
+            try:
+                proxy_enable, _ = winreg.QueryValueEx(key, 'ProxyEnable')
+                if not proxy_enable:
+                    return None
+                
+                proxy_server, _ = winreg.QueryValueEx(key, 'ProxyServer')
+                
+                if proxy_server:
+                    if '=' in proxy_server:
+                        for part in proxy_server.split(';'):
+                            if part.startswith('http=') or part.startswith('https='):
+                                addr = part.split('=', 1)[1]
+                                if not addr.startswith('http'):
+                                    addr = f'http://{addr}'
+                                return addr
+                    else:
+                        if not proxy_server.startswith('http'):
+                            proxy_server = f'http://{proxy_server}'
+                        return proxy_server
+                        
+            finally:
+                winreg.CloseKey(key)
+                
+        except (ImportError, OSError, FileNotFoundError):
             pass
-
-
-class DOCXMetadataWriter(MetadataWriter):
-    def write(self, path: Path, builder: MetadataBuilder) -> None:
-        try:
-            doc = Document(path)
-            cp = doc.core_properties
-            cp.title = builder.title
-            cp.author = builder.authors_str
-            cp.subject = builder.build_details_string()
-            cp.keywords = builder.keywords_str
-            cp.comments = "Metadata updated by Gemini File Renamer"
-            doc.save(path)
-        except Exception:
-            pass
-
-
-class EPUBMetadataWriter(MetadataWriter):
-    def _clear_creators(self, book: epub.EpubBook) -> None:
-        namespace = "http://purl.org/dc/elements/1.1/"
-        meta = book.metadata.get(namespace)
-        if isinstance(meta, dict) and "creator" in meta:
-            meta["creator"] = []
-        elif isinstance(meta, list):
-            book.metadata[namespace] = [
-                item for item in meta 
-                if not (isinstance(item, tuple) and item and item[0] == "creator")
-            ]
+        
+        return None
     
-    def write(self, path: Path, builder: MetadataBuilder) -> None:
+    @staticmethod
+    def get_macos_proxy():
+        """从 macOS 系统偏好设置获取代理"""
+        if platform.system() != 'Darwin':
+            return None
+        
         try:
-            book = epub.read_epub(path)
-            book.set_title(builder.title)
-            self._clear_creators(book)
-            for author in builder.authors:
-                book.add_author(author)
-            description_parts = []
-            details = builder.build_details_string()
-            if details:
-                description_parts.append(details)
-            if builder.keywords:
-                description_parts.append(f"Keywords: {builder.keywords_str}")
-            if description_parts:
-                book.add_metadata('DC', 'description', "\n".join(description_parts))
-            epub.write_epub(path, book)
+            import subprocess
+            
+            for service in ['Wi-Fi', 'Ethernet', 'USB 10/100/1000 LAN']:
+                try:
+                    result = subprocess.run(
+                        ['networksetup', '-getwebproxy', service],
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    
+                    if result.returncode == 0:
+                        lines = result.stdout.strip().split('\n')
+                        enabled = False
+                        server = None
+                        port = None
+                        
+                        for line in lines:
+                            if 'Enabled: Yes' in line:
+                                enabled = True
+                            elif line.startswith('Server:'):
+                                server = line.split(':', 1)[1].strip()
+                            elif line.startswith('Port:'):
+                                port = line.split(':', 1)[1].strip()
+                        
+                        if enabled and server and port:
+                            return f'http://{server}:{port}'
+                            
+                except subprocess.TimeoutExpired:
+                    continue
+                    
         except Exception:
             pass
-
-
-class MetadataWriterFactory:
-    _writers: Dict[str, MetadataWriter] = {
-        '.pdf': PDFMetadataWriter(),
-        '.docx': DOCXMetadataWriter(),
-        '.epub': EPUBMetadataWriter(),
-        '.azw3': EPUBMetadataWriter(),
-    }
+        
+        return None
+    
+    @staticmethod
+    def get_env_proxy():
+        """从环境变量获取代理设置"""
+        proxy_vars = [
+            'HTTPS_PROXY', 'https_proxy',
+            'HTTP_PROXY', 'http_proxy',
+            'ALL_PROXY', 'all_proxy',
+        ]
+        
+        for var in proxy_vars:
+            proxy = os.environ.get(var)
+            if proxy:
+                return proxy
+        
+        return None
+    
+    @staticmethod
+    def get_urllib_proxy():
+        """使用 urllib 获取系统代理"""
+        proxies = getproxies()
+        
+        if 'https' in proxies:
+            return proxies['https']
+        if 'http' in proxies:
+            return proxies['http']
+        
+        return None
     
     @classmethod
-    def get_writer(cls, extension: str) -> Optional[MetadataWriter]:
-        return cls._writers.get(extension.lower())
-
-
-# ============================================================================
-# File Renamer / 文件重命名器
-# ============================================================================
-
-class FileRenamer:
-    def __init__(self, write_metadata: bool = True):
-        self._write_metadata = write_metadata
-        self._executor = ThreadPoolExecutor(max_workers=4)
-    
-    async def process(self, path: Path, info: Dict[str, Any]) -> None:
-        builder = MetadataBuilder(info)
-        new_name = builder.build_filename()
+    def detect(cls):
+        """自动检测系统代理设置"""
+        # 1. 环境变量
+        proxy = cls.get_env_proxy()
+        if proxy:
+            return proxy
         
-        if not new_name:
-            return
+        # 2. 操作系统特定检测
+        system = platform.system()
         
-        safe_name = sanitize_filename(new_name).strip()
-        if not safe_name or safe_name in {".", ".."}:
-            return
+        if system == 'Windows':
+            proxy = cls.get_windows_proxy()
+            if proxy:
+                return proxy
         
-        new_path = path.with_name(f"{safe_name}{path.suffix}")
+        elif system == 'Darwin':
+            proxy = cls.get_macos_proxy()
+            if proxy:
+                return proxy
         
-        counter = 1
-        while new_path.exists() and new_path != path:
-            new_path = path.with_name(f"{safe_name}_{counter}{path.suffix}")
-            counter += 1
+        # 3. urllib 通用方法
+        proxy = cls.get_urllib_proxy()
+        if proxy:
+            return proxy
         
-        if new_path != path:
-            try:
-                path.rename(new_path)
-            except OSError:
-                return
-        
-        if self._write_metadata:
-            await self._write_metadata_async(new_path, builder)
-    
-    async def _write_metadata_async(self, path: Path, builder: MetadataBuilder) -> None:
-        writer = MetadataWriterFactory.get_writer(path.suffix)
-        if not writer:
-            return
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(self._executor, writer.write, path, builder)
-
-
-# ============================================================================
-# Batch Packing / 批处理打包
-# ============================================================================
-
-def pack_batches_ffd(
-    items: List[FileItem],
-    max_tokens: int,
-    max_items: Optional[int] = None
-) -> List[Batch]:
-    sorted_items = sorted(items, key=lambda x: x.tokens, reverse=True)
-    batches: List[Batch] = []
-    
-    for item in sorted_items:
-        placed = False
-        for batch in batches:
-            can_fit_tokens = batch.tokens + item.tokens <= max_tokens
-            can_fit_items = max_items is None or len(batch.items) < max_items
-            if can_fit_tokens and can_fit_items:
-                batch.items.append(item)
-                batch.tokens += item.tokens
-                placed = True
-                break
-        if not placed:
-            batches.append(Batch(items=[item], tokens=item.tokens))
-    
-    return batches
-
-
-# ============================================================================
-# Breakpoint Resume / 断点续传
-# ============================================================================
-
-class PendingFilesManager:
-    def __init__(self, log_path: Path):
-        self._log_path = log_path
-    
-    def load(self) -> List[Path]:
-        if not self._log_path.exists():
-            return []
-        try:
-            with open(self._log_path, 'r', encoding='utf-8') as f:
-                return [Path(line.strip()) for line in f if line.strip()]
-        except IOError:
-            return []
-    
-    def save(self, paths: Sequence[Path]) -> None:
-        try:
-            with open(self._log_path, 'w', encoding='utf-8') as f:
-                for path in paths:
-                    f.write(f"{path}\n")
-        except IOError:
-            pass
-    
-    def clear(self) -> None:
-        if self._log_path.exists():
-            try:
-                self._log_path.unlink()
-            except OSError:
-                pass
-
-
-def is_quota_error(error: Exception) -> bool:
-    msg = str(error).lower()
-    return any(keyword in msg for keyword in ("quota", "exceeded", "429"))
-
-
-# ============================================================================
-# File Processor / 文件处理器
-# ============================================================================
-
-class FileProcessor:
-    def __init__(
-        self,
-        config: Config,
-        limiter: RateLimiter,
-        renamer: FileRenamer,
-        logger: logging.Logger,
-        i18n: I18n
-    ):
-        self._config = config
-        self._limiter = limiter
-        self._renamer = renamer
-        self._logger = logger
-        self._i18n = i18n
-    
-    async def process_batch(
-        self,
-        batch: Batch,
-        progress_callback: Optional[Callable[[int], None]] = None
-    ) -> BatchResult:
-        if not batch.items or not MODEL.is_configured:
-            if progress_callback:
-                progress_callback(len(batch.items))
-            return BatchResult(success=False, failed_items=batch.items)
-        
-        parts = [PROMPTS['batch']]
-        for item in batch.items:
-            parts.extend([
-                f"\n\n--- START OF FILE: {item.path.name} ---\n",
-                item.text,
-                f"\n--- END OF FILE: {item.path.name} ---"
-            ])
-        prompt = "".join(parts)
-        
-        for attempt in range(self._config.max_retries):
-            try:
-                await self._limiter.acquire(batch.tokens)
-                response = await MODEL.generate_content(prompt, BATCH_SCHEMA)
-                results = json.loads(response)
-                
-                if not isinstance(results, list) or len(results) != len(batch.items):
-                    self._logger.warning(self._i18n.get('batch_mismatch'))
-                    if progress_callback:
-                        progress_callback(len(batch.items))
-                    return BatchResult(success=False, failed_items=batch.items)
-                
-                for item, info in zip(batch.items, results):
-                    await self._renamer.process(item.path, info)
-                    self._logger.info(self._i18n.get('processed', name=item.path.name))
-                
-                if progress_callback:
-                    progress_callback(len(batch.items))
-                return BatchResult(success=True)
-                
-            except json.JSONDecodeError:
-                self._logger.error(self._i18n.get('json_parse_error'))
-                break
-            except Exception as e:
-                self._logger.error(self._i18n.get('batch_error', attempt=attempt + 1, error=e))
-                if is_quota_error(e):
-                    return BatchResult(success=False, failed_items=batch.items, quota_exceeded=True)
-                if attempt < self._config.max_retries - 1:
-                    await asyncio.sleep(2 ** (attempt + 1))
-        
-        if progress_callback:
-            progress_callback(len(batch.items))
-        return BatchResult(success=False, failed_items=batch.items)
-    
-    async def process_single(
-        self,
-        item: FileItem,
-        progress_callback: Optional[Callable[[int], None]] = None
-    ) -> SingleResult:
-        if not MODEL.is_configured:
-            if progress_callback:
-                progress_callback(1)
-            return SingleResult(success=False, failed_item=item)
-        
-        prompt = f"{PROMPTS['single']}\n\n{item.text}"
-        
-        for attempt in range(self._config.max_retries):
-            try:
-                await self._limiter.acquire(item.tokens)
-                response = await MODEL.generate_content(prompt, SINGLE_OBJECT_SCHEMA)
-                info = json.loads(response)
-                
-                await self._renamer.process(item.path, info)
-                self._logger.info(self._i18n.get('processed', name=item.path.name))
-                
-                if progress_callback:
-                    progress_callback(1)
-                return SingleResult(success=True)
-                
-            except json.JSONDecodeError:
-                self._logger.error(self._i18n.get('json_parse_error') + f": {item.path.name}")
-                break
-            except Exception as e:
-                self._logger.error(self._i18n.get('single_error', name=item.path.name, error=e))
-                if is_quota_error(e):
-                    return SingleResult(success=False, failed_item=item, quota_exceeded=True)
-                if attempt < self._config.max_retries - 1:
-                    await asyncio.sleep(2 ** (attempt + 1))
-        
-        if progress_callback:
-            progress_callback(1)
-        return SingleResult(success=False, failed_item=item)
-
-
-# ============================================================================
-# Modern GUI / 现代化 GUI 界面
-# ============================================================================
-
-class ModernStyle:
-    """Modern style definitions / 现代化样式定义"""
-    
-    # Color scheme - Dark theme / 颜色方案 - 深色主题
-    BG_PRIMARY = "#1a1a2e"
-    BG_SECONDARY = "#16213e"
-    BG_TERTIARY = "#0f3460"
-    ACCENT = "#e94560"
-    ACCENT_HOVER = "#ff6b6b"
-    TEXT_PRIMARY = "#eaeaea"
-    TEXT_SECONDARY = "#a0a0a0"
-    SUCCESS = "#4ecca3"
-    WARNING = "#ffc107"
-    ERROR = "#ff6b6b"
-    BORDER = "#2d3a4f"
-    
-    # Fonts / 字体
-    FONT_FAMILY = "Segoe UI"
-    FONT_FAMILY_FALLBACK = ("Segoe UI", "PingFang SC", "Microsoft YaHei", "Helvetica", "Arial")
-    FONT_SIZE_LARGE = 13
-    FONT_SIZE_NORMAL = 11
-    FONT_SIZE_SMALL = 10
+        return None
     
     @classmethod
-    def configure_styles(cls, root: tk.Tk) -> None:
-        """Configure ttk styles / 配置 ttk 样式"""
-        style = ttk.Style(root)
+    def apply(cls, proxy=None, auto_detect=True):
+        """将代理设置应用到环境变量"""
+        result = {'proxy': None, 'applied': False, 'message': ''}
         
-        try:
-            style.theme_use('clam')
-        except tk.TclError:
-            pass
-        
-        style.configure("Modern.TFrame", background=cls.BG_PRIMARY)
-        style.configure("Card.TFrame", background=cls.BG_SECONDARY, relief="flat")
-        style.configure("Modern.TLabel", background=cls.BG_PRIMARY, foreground=cls.TEXT_PRIMARY,
-                       font=(cls.FONT_FAMILY, cls.FONT_SIZE_NORMAL))
-        style.configure("Title.TLabel", background=cls.BG_PRIMARY, foreground=cls.TEXT_PRIMARY,
-                       font=(cls.FONT_FAMILY, 20, "bold"))
-        style.configure("Subtitle.TLabel", background=cls.BG_PRIMARY, foreground=cls.TEXT_SECONDARY,
-                       font=(cls.FONT_FAMILY, cls.FONT_SIZE_SMALL))
-        style.configure("CardTitle.TLabel", background=cls.BG_SECONDARY, foreground=cls.TEXT_PRIMARY,
-                       font=(cls.FONT_FAMILY, cls.FONT_SIZE_LARGE, "bold"))
-        style.configure("CardText.TLabel", background=cls.BG_SECONDARY, foreground=cls.TEXT_SECONDARY,
-                       font=(cls.FONT_FAMILY, cls.FONT_SIZE_NORMAL))
-        style.configure("Accent.TButton", background=cls.ACCENT, foreground="white",
-                       font=(cls.FONT_FAMILY, cls.FONT_SIZE_NORMAL, "bold"), padding=(20, 12), borderwidth=0)
-        style.map("Accent.TButton", background=[("active", cls.ACCENT_HOVER), ("disabled", cls.BG_TERTIARY)],
-                 foreground=[("disabled", cls.TEXT_SECONDARY)])
-        style.configure("Secondary.TButton", background=cls.BG_TERTIARY, foreground=cls.TEXT_PRIMARY,
-                       font=(cls.FONT_FAMILY, cls.FONT_SIZE_NORMAL), padding=(16, 10), borderwidth=0)
-        style.map("Secondary.TButton", background=[("active", cls.BORDER)])
-        style.configure("Modern.Horizontal.TProgressbar", background=cls.ACCENT, troughcolor=cls.BG_TERTIARY,
-                       borderwidth=0, lightcolor=cls.ACCENT, darkcolor=cls.ACCENT)
-        style.configure("Modern.TCheckbutton", background=cls.BG_SECONDARY, foreground=cls.TEXT_PRIMARY,
-                       font=(cls.FONT_FAMILY, cls.FONT_SIZE_NORMAL), indicatorbackground=cls.BG_TERTIARY,
-                       indicatorforeground=cls.ACCENT)
-        style.map("Modern.TCheckbutton", background=[("active", cls.BG_SECONDARY)],
-                 indicatorbackground=[("selected", cls.ACCENT)])
-        style.configure("Modern.TRadiobutton", background=cls.BG_SECONDARY, foreground=cls.TEXT_PRIMARY,
-                       font=(cls.FONT_FAMILY, cls.FONT_SIZE_NORMAL), indicatorbackground=cls.BG_TERTIARY)
-        style.map("Modern.TRadiobutton", background=[("active", cls.BG_SECONDARY)],
-                 indicatorbackground=[("selected", cls.ACCENT)])
-
-
-class GeminiRenamerGUI:
-    """Gemini File Renamer GUI / Gemini 文件重命名工具 GUI"""
-    
-    def __init__(self):
-        self.root = tk.Tk()
-        self.i18n = I18n('zh')
-        
-        self.root.title(self.i18n.get('app_title'))
-        self.root.geometry("900x750")
-        self.root.minsize(800, 650)
-        self.root.configure(bg=ModernStyle.BG_PRIMARY)
-        
-        ModernStyle.configure_styles(self.root)
-        
-        # State variables / 状态变量
-        self.target_dir = tk.StringVar(value="")
-        self.api_keys = tk.StringVar(value=os.getenv("GOOGLE_API_KEY", ""))
-        self.mode = tk.StringVar(value="batch")
-        self.write_metadata = tk.BooleanVar(value=True)
-        self.is_processing = False
-        self.show_key = tk.BooleanVar(value=False)
-        
-        # Log queue / 日志队列
-        self.log_queue: queue.Queue = queue.Queue()
-        
-        # Configure logging / 配置日志
-        self.logger = logging.getLogger("GeminiRenamer")
-        self.logger.setLevel(logging.INFO)
-        handler = QueueHandler(self.log_queue)
-        handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s', datefmt='%H:%M:%S'))
-        self.logger.addHandler(handler)
-        
-        # Store widget references for language updates / 存储组件引用用于语言更新
-        self.widgets: Dict[str, Any] = {}
-        
-        self._build_ui()
-        self._update_log()
-    
-    def _build_ui(self) -> None:
-        """Build user interface / 构建用户界面"""
-        # Main scrollable container / 主滚动容器
-        self.canvas = tk.Canvas(self.root, bg=ModernStyle.BG_PRIMARY, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=self.canvas.yview)
-        self.scrollable_frame = ttk.Frame(self.canvas, style="Modern.TFrame")
-        
-        self.scrollable_frame.bind(
-            "<Configure>",
-            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        )
-        
-        self.canvas_window = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
-        self.canvas.configure(yscrollcommand=scrollbar.set)
-        
-        # Bind mouse wheel / 绑定鼠标滚轮
-        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-        self.canvas.bind_all("<Button-4>", self._on_mousewheel)
-        self.canvas.bind_all("<Button-5>", self._on_mousewheel)
-        
-        # Bind canvas resize / 绑定画布大小调整
-        self.canvas.bind("<Configure>", self._on_canvas_configure)
-        
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        # Main content frame / 主内容框架
-        main_frame = ttk.Frame(self.scrollable_frame, style="Modern.TFrame")
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=25, pady=15)
-        
-        self._build_header(main_frame)
-        self._build_api_card(main_frame)
-        self._build_directory_card(main_frame)
-        self._build_options_card(main_frame)
-        self._build_progress_section(main_frame)
-        self._build_action_buttons(main_frame)
-    
-    def _on_canvas_configure(self, event: tk.Event) -> None:
-        """Handle canvas resize / 处理画布大小调整"""
-        self.canvas.itemconfig(self.canvas_window, width=event.width)
-    
-    def _on_mousewheel(self, event: tk.Event) -> None:
-        """Handle mouse wheel scroll / 处理鼠标滚轮滚动"""
-        if event.num == 5 or event.delta < 0:
-            self.canvas.yview_scroll(1, "units")
-        elif event.num == 4 or event.delta > 0:
-            self.canvas.yview_scroll(-1, "units")
-    
-    def _build_header(self, parent: ttk.Frame) -> None:
-        """Build header section / 构建标题区域"""
-        header_frame = ttk.Frame(parent, style="Modern.TFrame")
-        header_frame.pack(fill=tk.X, pady=(0, 15))
-        
-        # Top row with title and language switch / 顶部行包含标题和语言切换
-        top_row = ttk.Frame(header_frame, style="Modern.TFrame")
-        top_row.pack(fill=tk.X)
-        
-        self.widgets['title'] = ttk.Label(top_row, text=self.i18n.get('header_title'), style="Title.TLabel")
-        self.widgets['title'].pack(side=tk.LEFT, anchor="w")
-        
-        # Language switch button / 语言切换按钮
-        lang_frame = tk.Frame(top_row, bg=ModernStyle.BG_PRIMARY)
-        lang_frame.pack(side=tk.RIGHT)
-        
-        self.widgets['lang_btn'] = tk.Button(
-            lang_frame,
-            text=self.i18n.get('language') + ": " + ("中文" if self.i18n.lang == 'zh' else "English"),
-            command=self._toggle_language,
-            bg=ModernStyle.BG_TERTIARY, fg=ModernStyle.TEXT_PRIMARY,
-            activebackground=ModernStyle.BORDER, activeforeground=ModernStyle.TEXT_PRIMARY,
-            relief="flat", cursor="hand2",
-            font=(ModernStyle.FONT_FAMILY, ModernStyle.FONT_SIZE_SMALL), padx=12, pady=5
-        )
-        self.widgets['lang_btn'].pack()
-        
-        self.widgets['subtitle'] = ttk.Label(header_frame, text=self.i18n.get('header_subtitle'), style="Subtitle.TLabel")
-        self.widgets['subtitle'].pack(anchor="w", pady=(5, 0))
-    
-    def _build_api_card(self, parent: ttk.Frame) -> None:
-        """Build API key card / 构建 API 密钥卡片"""
-        card, content = self._create_card(parent, 'api_card_title')
-        
-        self.widgets['api_hint'] = ttk.Label(content, text=self.i18n.get('api_hint'), style="CardText.TLabel")
-        self.widgets['api_hint'].pack(anchor="w", pady=(0, 8))
-        
-        entry_frame = tk.Frame(content, bg=ModernStyle.BG_TERTIARY, highlightthickness=1,
-                               highlightbackground=ModernStyle.BORDER)
-        entry_frame.pack(fill=tk.X)
-        
-        self.api_entry = tk.Entry(
-            entry_frame, textvariable=self.api_keys,
-            font=(ModernStyle.FONT_FAMILY, ModernStyle.FONT_SIZE_NORMAL),
-            bg=ModernStyle.BG_TERTIARY, fg=ModernStyle.TEXT_PRIMARY,
-            insertbackground=ModernStyle.TEXT_PRIMARY, relief="flat", show="•"
-        )
-        self.api_entry.pack(fill=tk.X, padx=12, pady=10)
-        
-        self.widgets['show_key_btn'] = tk.Button(
-            content, text=self.i18n.get('show_key'), command=self._toggle_key_visibility,
-            bg=ModernStyle.BG_SECONDARY, fg=ModernStyle.TEXT_SECONDARY,
-            activebackground=ModernStyle.BG_TERTIARY, activeforeground=ModernStyle.TEXT_PRIMARY,
-            relief="flat", cursor="hand2", font=(ModernStyle.FONT_FAMILY, ModernStyle.FONT_SIZE_SMALL)
-        )
-        self.widgets['show_key_btn'].pack(anchor="w", pady=(8, 0))
-    
-    def _build_directory_card(self, parent: ttk.Frame) -> None:
-        """Build directory selection card / 构建目录选择卡片"""
-        card, content = self._create_card(parent, 'dir_card_title')
-        
-        dir_frame = ttk.Frame(content, style="Card.TFrame")
-        dir_frame.pack(fill=tk.X)
-        
-        path_frame = tk.Frame(dir_frame, bg=ModernStyle.BG_TERTIARY, highlightthickness=1,
-                              highlightbackground=ModernStyle.BORDER)
-        path_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        self.path_entry = tk.Entry(
-            path_frame, textvariable=self.target_dir,
-            font=(ModernStyle.FONT_FAMILY, ModernStyle.FONT_SIZE_NORMAL),
-            bg=ModernStyle.BG_TERTIARY, fg=ModernStyle.TEXT_PRIMARY,
-            insertbackground=ModernStyle.TEXT_PRIMARY, relief="flat"
-        )
-        self.path_entry.pack(fill=tk.X, padx=12, pady=10)
-        
-        self.widgets['browse_btn'] = tk.Button(
-            dir_frame, text=self.i18n.get('browse'), command=self._browse_directory,
-            bg=ModernStyle.BG_TERTIARY, fg=ModernStyle.TEXT_PRIMARY,
-            activebackground=ModernStyle.BORDER, activeforeground=ModernStyle.TEXT_PRIMARY,
-            relief="flat", cursor="hand2",
-            font=(ModernStyle.FONT_FAMILY, ModernStyle.FONT_SIZE_NORMAL), padx=20, pady=8
-        )
-        self.widgets['browse_btn'].pack(side=tk.RIGHT, padx=(10, 0))
-        
-        self.widgets['file_count'] = ttk.Label(content, text=self.i18n.get('select_dir_hint'), style="CardText.TLabel")
-        self.widgets['file_count'].pack(anchor="w", pady=(10, 0))
-    
-    def _build_options_card(self, parent: ttk.Frame) -> None:
-        """Build options card / 构建选项卡片"""
-        card, content = self._create_card(parent, 'options_card_title')
-        
-        options_frame = ttk.Frame(content, style="Card.TFrame")
-        options_frame.pack(fill=tk.X)
-        
-        # Left: Processing mode / 左侧：处理模式
-        left_frame = ttk.Frame(options_frame, style="Card.TFrame")
-        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        self.widgets['mode_label'] = ttk.Label(left_frame, text=self.i18n.get('processing_mode'), style="CardText.TLabel")
-        self.widgets['mode_label'].pack(anchor="w")
-        
-        self.widgets['batch_radio'] = ttk.Radiobutton(
-            left_frame, text=self.i18n.get('batch_mode'),
-            variable=self.mode, value="batch", style="Modern.TRadiobutton"
-        )
-        self.widgets['batch_radio'].pack(anchor="w", pady=(5, 2))
-        
-        self.widgets['single_radio'] = ttk.Radiobutton(
-            left_frame, text=self.i18n.get('single_mode'),
-            variable=self.mode, value="single", style="Modern.TRadiobutton"
-        )
-        self.widgets['single_radio'].pack(anchor="w")
-        
-        # Right: Other options / 右侧：其他选项
-        right_frame = ttk.Frame(options_frame, style="Card.TFrame")
-        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(30, 0))
-        
-        self.widgets['other_label'] = ttk.Label(right_frame, text=self.i18n.get('other_options'), style="CardText.TLabel")
-        self.widgets['other_label'].pack(anchor="w")
-        
-        self.widgets['metadata_check'] = ttk.Checkbutton(
-            right_frame, text=self.i18n.get('write_metadata'),
-            variable=self.write_metadata, style="Modern.TCheckbutton"
-        )
-        self.widgets['metadata_check'].pack(anchor="w", pady=(5, 0))
-    
-    def _build_progress_section(self, parent: ttk.Frame) -> None:
-        """Build progress and log section / 构建进度和日志区域"""
-        progress_frame = ttk.Frame(parent, style="Modern.TFrame")
-        progress_frame.pack(fill=tk.X, pady=(15, 10))
-        
-        self.widgets['progress_label'] = ttk.Label(progress_frame, text=self.i18n.get('ready'), style="Modern.TLabel")
-        self.widgets['progress_label'].pack(anchor="w")
-        
-        self.progress_bar = ttk.Progressbar(
-            progress_frame, style="Modern.Horizontal.TProgressbar", mode="determinate", length=400
-        )
-        self.progress_bar.pack(fill=tk.X, pady=(8, 0))
-        
-        log_frame = ttk.Frame(parent, style="Modern.TFrame")
-        log_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
-        
-        self.widgets['log_label'] = ttk.Label(log_frame, text=self.i18n.get('log_title'), style="Modern.TLabel")
-        self.widgets['log_label'].pack(anchor="w", pady=(0, 5))
-        
-        log_container = tk.Frame(log_frame, bg=ModernStyle.BORDER)
-        log_container.pack(fill=tk.BOTH, expand=True)
-        
-        self.log_text = scrolledtext.ScrolledText(
-            log_container, font=(ModernStyle.FONT_FAMILY, ModernStyle.FONT_SIZE_SMALL),
-            bg=ModernStyle.BG_TERTIARY, fg=ModernStyle.TEXT_SECONDARY,
-            insertbackground=ModernStyle.TEXT_PRIMARY, relief="flat", height=8, wrap=tk.WORD
-        )
-        self.log_text.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
-        self.log_text.configure(state="disabled")
-    
-    def _build_action_buttons(self, parent: ttk.Frame) -> None:
-        """Build action buttons / 构建操作按钮"""
-        button_frame = ttk.Frame(parent, style="Modern.TFrame")
-        button_frame.pack(fill=tk.X, pady=(15, 10))
-        
-        self.widgets['start_btn'] = tk.Button(
-            button_frame, text=self.i18n.get('start'), command=self._start_processing,
-            bg=ModernStyle.ACCENT, fg="white",
-            activebackground=ModernStyle.ACCENT_HOVER, activeforeground="white",
-            relief="flat", cursor="hand2",
-            font=(ModernStyle.FONT_FAMILY, ModernStyle.FONT_SIZE_LARGE, "bold"), padx=30, pady=12
-        )
-        self.widgets['start_btn'].pack(side=tk.RIGHT)
-        
-        self.widgets['clear_btn'] = tk.Button(
-            button_frame, text=self.i18n.get('clear_log'), command=self._clear_log,
-            bg=ModernStyle.BG_TERTIARY, fg=ModernStyle.TEXT_SECONDARY,
-            activebackground=ModernStyle.BORDER, activeforeground=ModernStyle.TEXT_PRIMARY,
-            relief="flat", cursor="hand2",
-            font=(ModernStyle.FONT_FAMILY, ModernStyle.FONT_SIZE_NORMAL), padx=16, pady=10
-        )
-        self.widgets['clear_btn'].pack(side=tk.LEFT)
-    
-    def _create_card(self, parent: ttk.Frame, title_key: str) -> Tuple[tk.Frame, tk.Frame]:
-        """Create card component / 创建卡片组件"""
-        outer = tk.Frame(parent, bg=ModernStyle.BORDER)
-        outer.pack(fill=tk.X, pady=(0, 12))
-        
-        card = tk.Frame(outer, bg=ModernStyle.BG_SECONDARY)
-        card.pack(fill=tk.X, padx=1, pady=1)
-        
-        content = tk.Frame(card, bg=ModernStyle.BG_SECONDARY)
-        content.pack(fill=tk.X, padx=20, pady=12)
-        
-        title_label = tk.Label(
-            content, text=self.i18n.get(title_key),
-            bg=ModernStyle.BG_SECONDARY, fg=ModernStyle.TEXT_PRIMARY,
-            font=(ModernStyle.FONT_FAMILY, ModernStyle.FONT_SIZE_LARGE, "bold")
-        )
-        title_label.pack(anchor="w", pady=(0, 8))
-        self.widgets[title_key] = title_label
-        
-        return card, content
-    
-    def _toggle_language(self) -> None:
-        """Toggle language / 切换语言"""
-        self.i18n.toggle()
-        self._update_ui_language()
-    
-    def _update_ui_language(self) -> None:
-        """Update UI language / 更新界面语言"""
-        self.root.title(self.i18n.get('app_title'))
-        
-        # Update widgets / 更新组件
-        updates = {
-            'title': 'header_title',
-            'subtitle': 'header_subtitle',
-            'api_card_title': 'api_card_title',
-            'api_hint': 'api_hint',
-            'dir_card_title': 'dir_card_title',
-            'options_card_title': 'options_card_title',
-            'mode_label': 'processing_mode',
-            'other_label': 'other_options',
-            'log_label': 'log_title',
-        }
-        
-        for widget_key, i18n_key in updates.items():
-            if widget_key in self.widgets:
-                self.widgets[widget_key].configure(text=self.i18n.get(i18n_key))
-        
-        # Update buttons / 更新按钮
-        if 'browse_btn' in self.widgets:
-            self.widgets['browse_btn'].configure(text=self.i18n.get('browse'))
-        if 'clear_btn' in self.widgets:
-            self.widgets['clear_btn'].configure(text=self.i18n.get('clear_log'))
-        if 'start_btn' in self.widgets:
-            btn_text = self.i18n.get('processing_btn') if self.is_processing else self.i18n.get('start')
-            self.widgets['start_btn'].configure(text=btn_text)
-        if 'lang_btn' in self.widgets:
-            lang_text = "中文" if self.i18n.lang == 'zh' else "English"
-            self.widgets['lang_btn'].configure(text=self.i18n.get('language') + ": " + lang_text)
-        if 'show_key_btn' in self.widgets:
-            key_text = self.i18n.get('hide_key') if self.show_key.get() else self.i18n.get('show_key')
-            self.widgets['show_key_btn'].configure(text=key_text)
-        
-        # Update radio buttons / 更新单选按钮
-        if 'batch_radio' in self.widgets:
-            self.widgets['batch_radio'].configure(text=self.i18n.get('batch_mode'))
-        if 'single_radio' in self.widgets:
-            self.widgets['single_radio'].configure(text=self.i18n.get('single_mode'))
-        if 'metadata_check' in self.widgets:
-            self.widgets['metadata_check'].configure(text=self.i18n.get('write_metadata'))
-        
-        # Update progress label / 更新进度标签
-        if 'progress_label' in self.widgets and not self.is_processing:
-            self.widgets['progress_label'].configure(text=self.i18n.get('ready'))
-        
-        # Update file count / 更新文件计数
-        self._update_file_count()
-    
-    def _toggle_key_visibility(self) -> None:
-        """Toggle key visibility / 切换密钥可见性"""
-        self.show_key.set(not self.show_key.get())
-        self.api_entry.configure(show="" if self.show_key.get() else "•")
-        key_text = self.i18n.get('hide_key') if self.show_key.get() else self.i18n.get('show_key')
-        self.widgets['show_key_btn'].configure(text=key_text)
-    
-    def _browse_directory(self) -> None:
-        """Browse directory / 浏览选择目录"""
-        directory = filedialog.askdirectory(
-            title=self.i18n.get('select_dir_hint'),
-            initialdir=self.target_dir.get() or os.getcwd()
-        )
-        if directory:
-            self.target_dir.set(directory)
-            self._update_file_count()
-    
-    def _update_file_count(self) -> None:
-        """Update file count / 更新文件计数"""
-        dir_path = Path(self.target_dir.get())
-        if not dir_path.is_dir():
-            self.widgets['file_count'].configure(text=self.i18n.get('select_dir_hint'))
-            return
-        
-        count = 0
-        for ext in CONFIG.supported_extensions:
-            count += len(list(dir_path.glob(f"**/*{ext}")))
-        
-        if count > 0:
-            self.widgets['file_count'].configure(text=self.i18n.get('files_found', count=count))
+        if proxy:
+            proxy_to_use = proxy
+            result['message'] = f"使用手动指定代理: {proxy}"
+        elif auto_detect:
+            proxy_to_use = cls.detect()
+            if proxy_to_use:
+                result['message'] = f"自动检测到代理: {proxy_to_use}"
+            else:
+                result['message'] = "未检测到系统代理"
+                return result
         else:
-            self.widgets['file_count'].configure(text=self.i18n.get('no_files_found'))
+            result['message'] = "代理功能已禁用"
+            return result
+        
+        result['proxy'] = proxy_to_use
+        
+        # 设置环境变量
+        os.environ['HTTP_PROXY'] = proxy_to_use
+        os.environ['HTTPS_PROXY'] = proxy_to_use
+        os.environ['http_proxy'] = proxy_to_use
+        os.environ['https_proxy'] = proxy_to_use
+        os.environ['GRPC_PROXY'] = proxy_to_use
+        
+        result['applied'] = True
+        return result
     
-    def _clear_log(self) -> None:
-        """Clear log / 清除日志"""
-        self.log_text.configure(state="normal")
-        self.log_text.delete(1.0, tk.END)
-        self.log_text.configure(state="disabled")
+    @classmethod
+    def clear(cls):
+        """清除代理环境变量"""
+        proxy_vars = [
+            'HTTP_PROXY', 'HTTPS_PROXY', 'GRPC_PROXY',
+            'http_proxy', 'https_proxy', 'grpc_proxy',
+            'ALL_PROXY', 'all_proxy'
+        ]
+        
+        for var in proxy_vars:
+            if var in os.environ:
+                del os.environ[var]
+
+
+# =======================================================================================
+# SECTION 1: 后端核心逻辑
+# =======================================================================================
+
+class Backend:
+    """封装所有后台文件处理和API交互逻辑"""
+
+    def __init__(self, gui_queue):
+        self.gui_queue = gui_queue
+        self.model = None
+        self.stop_event = None
+        
+        # --- 全局常量与路径定义 ---
+        self.RPM_LIMIT = 10
+        self.TPM_LIMIT = 250000
+        self.DAILY_REQUEST_LIMIT = 250
+        self.MAX_TOKENS_PER_BATCH = 28000
+        self.CONCURRENCY_LIMIT = 10
+        self.MAX_RETRIES = 3
+        self.SUPPORTED_EXTENSIONS = ['.pdf', '.epub', '.azw3', '.docx']
+        
+        self.PENDING_FILES_LOG = Path("./pending_files.txt")
+        self.TRACKER_FILE = Path("./request_tracker.json")
+        
+        self.API_PROMPT_INSTRUCTION_BATCH = """
+        Analyze the following text, which contains MULTIPLE documents concatenated together.
+        Each document starts with a "--- START OF FILE: [filename] ---" marker and ends with an "--- END OF FILE: [filename] ---" marker.
+        For EACH document provided, extract its metadata and create a corresponding JSON object.
+        Return a single JSON array (a list) containing all the extracted JSON objects.
+        The order of objects in the final list MUST match the order of the documents in the input text.
+        Do not add any commentary. Only return the JSON array.
+        """
+        self.API_PROMPT_INSTRUCTION_SINGLE = """
+        Analyze the following text from a single document.
+        Extract its metadata and create a corresponding JSON object.
+        Return only the single JSON object. Do not add any commentary.
+        """
+        self.SINGLE_OBJECT_SCHEMA = {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "authors": {"type": "array", "items": {"type": "string"}},
+                "translators": {"type": "string"},
+                "editors": {"type": "string"},
+                "publisher_or_journal": {"type": "string"},
+                "journal_volume_issue": {"type": "string"},
+                "publication_date": {"type": "string"},
+                "start_page": {"type": "integer"}
+            },
+            "required": ["title", "authors"]
+        }
+        self.JSON_SCHEMA_BATCH = {"type": "array", "items": self.SINGLE_OBJECT_SCHEMA}
+        self.JOURNAL_KEYWORDS = ["journal", "review", "proceedings", "transactions", "quarterly", "annals", "bulletin", "magazine", "advances", "letters", "studies"]
+
+    def log_to_gui(self, message, level="INFO"):
+        self.gui_queue.put(f"[{level}] {message}")
+
+    def load_request_tracker(self, silent=False):
+        today_str = date.today().isoformat()
+        default_tracker = {"date": today_str, "usage": {}}
+        if not self.TRACKER_FILE.exists():
+            return default_tracker
+        try:
+            with open(self.TRACKER_FILE, 'r', encoding='utf-8') as f:
+                tracker = json.load(f)
+            if not silent and tracker.get("date") != today_str:
+                self.log_to_gui("新的一天，重置所有API密钥的每日请求计数器。")
+                return default_tracker
+            if "usage" not in tracker:
+                tracker["usage"] = {}
+            return tracker
+        except (json.JSONDecodeError, IOError) as e:
+            self.log_to_gui(f"读取请求跟踪文件失败，将重新开始计数。错误: {e}", "WARNING")
+            return default_tracker
+
+    def save_request_tracker(self, tracker_data):
+        try:
+            with open(self.TRACKER_FILE, 'w', encoding='utf-8') as f:
+                json.dump(tracker_data, f, indent=4, ensure_ascii=False)
+            if threading.current_thread() is not threading.main_thread():
+                 self.log_to_gui("API用量信息已更新。", "DEBUG")
+        except IOError as e:
+            self.log_to_gui(f"保存请求跟踪文件失败: {e}", "ERROR")
+
+    def load_pending_files(self):
+        if not self.PENDING_FILES_LOG.exists():
+            return []
+        try:
+            with open(self.PENDING_FILES_LOG, 'r', encoding='utf-8') as f:
+                return [Path(line.strip()) for line in f if line.strip() and Path(line.strip()).exists()]
+        except IOError:
+            return []
+
+    def save_pending_files(self, file_paths):
+        try:
+            with open(self.PENDING_FILES_LOG, 'w', encoding='utf-8') as f:
+                for path in file_paths:
+                    f.write(f"{path}\n")
+        except IOError as e:
+            self.log_to_gui(f"无法写入待处理文件日志: {e}", "ERROR")
+
+    def clear_pending_files_log(self):
+        if self.PENDING_FILES_LOG.exists():
+            try:
+                self.PENDING_FILES_LOG.unlink()
+                self.log_to_gui("所有任务完成，待处理文件日志已清空。")
+            except OSError as e:
+                self.log_to_gui(f"无法清空待处理文件日志: {e}", "ERROR")
+
+    class RateLimiter:
+        def __init__(self, rpm, tpm, logger):
+            self.rpm, self.tpm, self.logger = rpm, tpm, logger
+            self.request_timestamps, self.token_timestamps = deque(), deque()
+
+        async def wait_for_slot(self, tokens_needed):
+            while True:
+                now = time.time()
+                while self.request_timestamps and self.request_timestamps[0] < now - 60:
+                    self.request_timestamps.popleft()
+                current_requests = len(self.request_timestamps)
+                if current_requests < self.rpm:
+                    self.request_timestamps.append(now)
+                    break
+                wait_time = max(1.0, (self.request_timestamps[0] + 60) - now)
+                self.logger(f"速率限制已达上限 (RPM)。等待 {wait_time:.2f} 秒...", "WARNING")
+                await asyncio.sleep(wait_time)
+
+    async def switch_and_configure_api(self, api_key):
+        try:
+            genai.configure(api_key=api_key)
+            self.model = genai.GenerativeModel('gemini-2.5-flash')
+            return True
+        except Exception as e:
+            self.log_to_gui(f"API 密钥 (前8位: {api_key[:8]}...) 配置失败。错误: {e}", "ERROR")
+            return False
+
+    def _extract_from_pdf(self, pdf_path):
+        text_content = []
+        try:
+            with pymupdf.open(pdf_path) as doc:
+                total_pages = doc.page_count
+                start_page_nums = list(range(min(4, total_pages)))
+                for i in start_page_nums:
+                    text_content.append(doc[i].get_text())
+                end_page_start_index = max(len(start_page_nums), total_pages - 3)
+                if end_page_start_index < total_pages:
+                    text_content.append("\n\n--- DOCUMENT END CONTENT ---\n\n")
+                    for i in range(end_page_start_index, total_pages):
+                        text_content.append(doc[i].get_text())
+        except Exception as e:
+            self.log_to_gui(f"提取PDF文本时出错: {pdf_path.name}, 错误: {e}", "ERROR")
+            return ""
+        return "".join(text_content)
+
+    def _extract_from_epub(self, epub_path):
+        text_content = []
+        try:
+            book = epub.read_epub(epub_path)
+            doc_items = list(book.get_items_of_type(ITEM_DOCUMENT))
+            total_chapters = len(doc_items)
+            items_to_process = []
+            if total_chapters <= 5 + 4:
+                items_to_process = doc_items
+            else:
+                items_to_process.extend(doc_items[:5])
+                items_to_process.append(None)
+                items_to_process.extend(doc_items[-4:])
+            for item in items_to_process:
+                if item is None:
+                    text_content.append("\n\n--- DOCUMENT END CONTENT ---\n\n")
+                    continue
+                soup = BeautifulSoup(item.get_body_content(), 'html.parser')
+                text_content.append(soup.get_text("\n", strip=True))
+        except Exception as e:
+            self.log_to_gui(f"提取 EPUB/AZW3 文本时出错: {epub_path.name}, 错误: {e}", "ERROR")
+            return ""
+        return "\n\n".join(text_content)
+
+    def _extract_from_docx(self, docx_path):
+        text_content = []
+        try:
+            doc = Document(docx_path)
+            all_paras = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+            total_paras = len(all_paras)
+            if total_paras <= 20 + 15:
+                text_content = all_paras
+            else:
+                text_content.extend(all_paras[:20])
+                text_content.append("\n\n--- DOCUMENT END CONTENT ---\n\n")
+                text_content.extend(all_paras[-15:])
+        except Exception as e:
+            self.log_to_gui(f"提取 DOCX 文本时出错: {docx_path.name}, 错误: {e}", "ERROR")
+            return ""
+        return "\n".join(text_content)
+
+    def extract_text_from_file(self, file_path):
+        extension = file_path.suffix.lower()
+        text_to_extract = ""
+        try:
+            if extension == '.pdf':
+                text_to_extract = self._extract_from_pdf(file_path)
+            elif extension in ['.epub', '.azw3']:
+                text_to_extract = self._extract_from_epub(file_path)
+            elif extension == '.docx':
+                text_to_extract = self._extract_from_docx(file_path)
+            else:
+                return None
+            return text_to_extract[:int(self.MAX_TOKENS_PER_BATCH * 0.9)]
+        except Exception as e:
+            self.log_to_gui(f"提取文本时发生未知错误: {file_path.name}, {e}", "ERROR")
+            return None
+
+    def build_filename(self, info):
+        if not info or not info.get('title'):
+            return None
+        template = "{title} - {authors} ({optional})"
+        parts = []
+        if info.get("translators") and info["translators"].lower() != 'null':
+            parts.append(f"{info['translators']} 译")
+        if info.get("editors") and info["editors"].lower() != 'null':
+            if not any(k in info.get("publisher_or_journal", "").lower() for k in self.JOURNAL_KEYWORDS):
+                parts.append(f"{info['editors']} 编")
+        if info.get("publisher_or_journal") and info["publisher_or_journal"].lower() != 'null':
+            parts.append(info["publisher_or_journal"])
+        if info.get("journal_volume_issue") and info["journal_volume_issue"].lower() != 'null':
+            parts.append(info["journal_volume_issue"])
+        if info.get("publication_date") and info["publication_date"].lower() != 'null':
+            parts.append(f"({info['publication_date']})")
+        if info.get("start_page"):
+            parts.append(f"p{info['start_page']}")
+        optional_str = ", ".join(part for part in parts if part)
+        fields = {"title": info.get("title", "无标题").strip(), "authors": "、".join(info.get("authors", [])).strip() or "作者不详", "optional": optional_str}
+        filename = template.format(**fields)
+        return filename.replace(" ()", "").strip() if not optional_str else filename.strip()
+
+    def rename_file(self, original_path, new_base_name):
+        if not new_base_name:
+            self.log_to_gui(f"无法为 {original_path.name} 构建有效文件名，跳过。", "WARNING")
+            return
+        safe_name = sanitize_filename(new_base_name)
+        new_path = original_path.with_name(f"{safe_name}{original_path.suffix}")
+        counter = 1
+        while new_path.exists() and new_path != original_path:
+            new_path = original_path.with_name(f"{safe_name}_{counter}{original_path.suffix}")
+            counter += 1
+        if new_path != original_path:
+            try:
+                original_path.rename(new_path)
+                self.log_to_gui(f"成功: '{original_path.name}' -> '{new_path.name}'", "SUCCESS")
+            except OSError as e:
+                self.log_to_gui(f"重命名文件时出错: {e}", "ERROR")
+
+    async def _process_single_file(self, file_item, limiter):
+        """处理单个文件"""
+        if self.stop_event.is_set(): return False
+
+        prompt_parts = [
+            self.API_PROMPT_INSTRUCTION_SINGLE,
+            f"\n\n--- START OF FILE: {file_item['path'].name} ---\n{file_item['text']}\n--- END OF FILE: {file_item['path'].name} ---"
+        ]
+        single_file_config = {"response_mime_type": "application/json", "response_schema": self.SINGLE_OBJECT_SCHEMA}
+
+        for attempt in range(self.MAX_RETRIES):
+            if self.stop_event.is_set(): return False
+            try:
+                await limiter.wait_for_slot(file_item['tokens'])
+                response = await self.model.generate_content_async("".join(prompt_parts), generation_config=single_file_config)
+                
+                if not response.parts:
+                    self.log_to_gui(f"文件 '{file_item['path'].name}' 因内容安全策略被过滤，已跳过。", "WARNING")
+                    self.gui_queue.put(("progress_update", 1))
+                    return False
+
+                info = json.loads(response.text)
+                self.rename_file(file_item['path'], self.build_filename(info))
+                self.gui_queue.put(("progress_update", 1))
+                return True
+            except Exception as e:
+                self.log_to_gui(f"处理单个文件 '{file_item['path'].name}' 时出错 (尝试 {attempt + 1}/{self.MAX_RETRIES}): {e}", "ERROR")
+                if "quota" in str(e).lower() or "429" in str(e):
+                    raise e
+                if attempt < self.MAX_RETRIES - 1:
+                    await asyncio.sleep(2 ** attempt)
+        
+        self.log_to_gui(f"文件 '{file_item['path'].name}' 处理失败，已跳过。", "ERROR")
+        self.gui_queue.put(("progress_update", 1))
+        return False
     
-    def _log(self, message: str) -> None:
-        """Add log message / 添加日志消息"""
-        self.log_text.configure(state="normal")
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-        self.log_text.configure(state="disabled")
+    async def process_batch(self, batch, limiter, semaphore):
+        """处理一个批次"""
+        if self.stop_event.is_set(): return False
+        async with semaphore:
+            if self.stop_event.is_set(): return False
+            if not batch: return True
+            
+            batch_tokens = sum(item['tokens'] for item in batch)
+            prompt_parts = [self.API_PROMPT_INSTRUCTION_BATCH]
+            for item in batch:
+                prompt_parts.append(f"\n\n--- START OF FILE: {item['path'].name} ---\n{item['text']}\n--- END OF FILE: {item['path'].name} ---")
+
+            for attempt in range(self.MAX_RETRIES):
+                if self.stop_event.is_set(): return False
+                try:
+                    await limiter.wait_for_slot(batch_tokens)
+                    batch_config = {"response_mime_type": "application/json", "response_schema": self.JSON_SCHEMA_BATCH}
+                    response = await self.model.generate_content_async("".join(prompt_parts), generation_config=batch_config)
+                    results = json.loads(response.text)
+
+                    if not isinstance(results, list) or len(results) != len(batch):
+                        self.log_to_gui(f"批处理返回结果数量({len(results)}/{len(batch)})或格式错误。", "WARNING")
+                        return False
+                    
+                    for i, info in enumerate(results):
+                        self.rename_file(batch[i]['path'], self.build_filename(info))
+                    
+                    self.gui_queue.put(("progress_update", len(batch)))
+                    return True
+                except Exception as e:
+                    self.log_to_gui(f"处理批次时出错 (尝试 {attempt + 1}/{self.MAX_RETRIES}): {e}", "ERROR")
+                    if "quota" in str(e).lower() or "429" in str(e):
+                        raise e 
+                    if attempt < self.MAX_RETRIES - 1:
+                        await asyncio.sleep(2 ** attempt)
+            
+            self.log_to_gui(f"批次处理失败，已达到最大重试次数。", "ERROR")
+            return False
+
+    async def run_processing(self, api_keys_str, target_dir_str, excluded_folder_paths, use_single_mode=False, stop_event=None, proxy_settings=None):
+        self.stop_event = stop_event
+        all_remaining_paths = []
+        
+        try:
+            # ===== 应用代理设置 =====
+            if proxy_settings:
+                auto_proxy = proxy_settings.get('auto', True)
+                manual_proxy = proxy_settings.get('manual', '').strip()
+                
+                if manual_proxy:
+                    result = ProxyDetector.apply(proxy=manual_proxy, auto_detect=False)
+                    self.log_to_gui(result['message'])
+                elif auto_proxy:
+                    result = ProxyDetector.apply(auto_detect=True)
+                    self.log_to_gui(result['message'])
+                else:
+                    self.log_to_gui("代理功能已禁用，将直接连接")
+            # =========================
+            
+            self.log_to_gui("开始处理...")
+            if self.stop_event.is_set(): return
+            if not api_keys_str or not target_dir_str:
+                self.log_to_gui("错误: API密钥和目标目录为必填项。", "ERROR")
+                return
+            api_keys = [key.strip() for key in api_keys_str.split(',') if key.strip()]
+            target_directory = Path(target_dir_str)
+            if not target_directory.is_dir():
+                self.log_to_gui(f"错误: 目录不存在: {target_dir_str}", "ERROR")
+                return
+
+            pending_paths = self.load_pending_files()
+            if self.stop_event.is_set(): return
+
+            if pending_paths:
+                self.log_to_gui(f"检测到断点日志，将只处理上次未完成的 {len(pending_paths)} 个文件。", "INFO")
+                files_to_process_paths = pending_paths
+            else:
+                self.log_to_gui("未检测到断点日志，将扫描整个目录进行新任务。")
+                all_found_files = list(set([p for ext in self.SUPPORTED_EXTENSIONS for p in target_directory.glob(f"**/*{ext}")]))
+                if excluded_folder_paths:
+                    resolved_excluded_paths = {p.resolve() for p in excluded_folder_paths}
+                    files_to_process_paths = [
+                        p for p in all_found_files
+                        if not any(p.resolve().is_relative_to(ex_p_res) for ex_p_res in resolved_excluded_paths)
+                    ]
+                else:
+                    files_to_process_paths = all_found_files
+            
+            if not files_to_process_paths:
+                self.log_to_gui("没有需要处理的文件。", "INFO")
+                self.clear_pending_files_log()
+                return
+
+            all_remaining_paths = list(files_to_process_paths)
+
+            if self.stop_event.is_set(): return
+            self.log_to_gui(f"找到 {len(files_to_process_paths)} 个文件待处理。")
+            self.gui_queue.put(("set_progress_max", len(files_to_process_paths)))
+            
+            self.log_to_gui("正在提取文件文本...")
+            all_file_data_map = {
+                path: {'path': path, 'text': self.extract_text_from_file(path) or "", 'tokens': 0}
+                for path in files_to_process_paths
+            }
+            for path, data in all_file_data_map.items():
+                data['tokens'] = len(data['text']) // 4
+            
+            limiter = self.RateLimiter(self.RPM_LIMIT, self.TPM_LIMIT, self.log_to_gui)
+
+            for key_index, api_key in enumerate(api_keys):
+                if self.stop_event.is_set() or not all_remaining_paths: break
+                
+                self.log_to_gui(f"\n--- 正在尝试使用 API 密钥 #{key_index + 1} ---")
+                if not await self.switch_and_configure_api(api_key):
+                    continue
+
+                successfully_processed_paths = set()
+                current_files_data = [all_file_data_map[path] for path in all_remaining_paths]
+
+                try:
+                    if use_single_mode:
+                        self.log_to_gui("--- 用户选择单文件处理模式 ---", "INFO")
+                        for item in current_files_data:
+                            if self.stop_event.is_set(): break
+                            if await self._process_single_file(item, limiter):
+                                successfully_processed_paths.add(item['path'])
+                    else:
+                        self.log_to_gui("--- 启动批处理模式 ---", "INFO")
+                        batches_queue = deque()
+                        batch, tokens = [], 0
+                        for item in sorted(current_files_data, key=lambda x: x['tokens']):
+                            if item['tokens'] > self.MAX_TOKENS_PER_BATCH:
+                                self.gui_queue.put(("progress_update", 1))
+                                successfully_processed_paths.add(item['path'])
+                                continue
+                            if batch and tokens + item['tokens'] > self.MAX_TOKENS_PER_BATCH:
+                                batches_queue.append(list(batch))
+                                batch, tokens = [], 0
+                            batch.append(item)
+                            tokens += item['tokens']
+                        if batch:
+                            batches_queue.append(list(batch))
+
+                        if not batches_queue:
+                            self.log_to_gui("根据剩余文件未能创建任何处理批次。")
+                            break
+                        
+                        self.log_to_gui(f"使用当前密钥处理 {len(batches_queue)} 个批次...")
+                        semaphore = asyncio.Semaphore(self.CONCURRENCY_LIMIT)
+                        tasks = [self.process_batch(b, limiter, semaphore) for b in batches_queue]
+                        results = await asyncio.gather(*tasks)
+
+                        for i, success in enumerate(results):
+                            if success:
+                                for item in batches_queue[i]:
+                                    successfully_processed_paths.add(item['path'])
+                except Exception as e:
+                    if "quota" in str(e).lower() or "429" in str(e):
+                        self.log_to_gui(f"API密钥配额已用尽或速率过快，将尝试下一个密钥。", "WARNING")
+                    else:
+                        raise e
+
+                all_remaining_paths = [path for path in all_remaining_paths if path not in successfully_processed_paths]
+
+            if self.stop_event.is_set():
+                self.log_to_gui("任务被用户终止。")
+            
+            if all_remaining_paths:
+                self.log_to_gui(f"处理完成，仍有 {len(all_remaining_paths)} 个文件未处理，已保存到断点日志。", "WARNING")
+                self.save_pending_files(all_remaining_paths)
+            else:
+                self.log_to_gui("所有文件已成功处理！")
+                self.clear_pending_files_log()
+
+        except Exception as e:
+            self.log_to_gui(f"发生严重错误: {e}", "CRITICAL")
+            import traceback
+            self.log_to_gui(traceback.format_exc(), "DEBUG")
+        finally:
+            if self.stop_event and self.stop_event.is_set():
+                 self.log_to_gui("处理线程已安全退出。")
+            elif all_remaining_paths:
+                 self.save_pending_files(all_remaining_paths)
+            self.gui_queue.put(("processing_finished", None))
+
+
+# =======================================================================================
+# SECTION 2: GUI 用户界面
+# =======================================================================================
+CONFIG_FILE = "config.json"
+
+class ExclusionDialog(ctk.CTkToplevel):
+    """选择要排除的子文件夹的对话框"""
+    def __init__(self, parent, target_directory):
+        super().__init__(parent)
+        self.parent_app = parent
+        self.title("选择要排除的文件夹")
+        self.geometry("450x350")
+        self.transient(parent)
+        self.grab_set()
+
+        self.checkbox_vars = {}
+        self.initial_excluded_str = {str(p.resolve()) for p in self.parent_app.excluded_folders}
+
+        label = ctk.CTkLabel(self, text="请勾选您想要排除的子文件夹:")
+        label.pack(padx=20, pady=(20, 10))
+
+        scrollable_frame = ctk.CTkScrollableFrame(self)
+        scrollable_frame.pack(expand=True, fill="both", padx=20, pady=10)
+
+        try:
+            target_dir_path = Path(target_directory).resolve()
+            subfolders = [p for p in target_dir_path.iterdir() if p.is_dir()]
+            if not subfolders:
+                ctk.CTkLabel(scrollable_frame, text="未找到子文件夹。").pack(pady=10)
+            else:
+                previously_excluded_str = self.initial_excluded_str
+                
+                for folder in sorted(subfolders):
+                    folder_path_str = str(folder.resolve())
+                    initial_value = folder_path_str if folder_path_str in previously_excluded_str else ""
+                    var = ctk.StringVar(value=initial_value)
+                    cb = ctk.CTkCheckBox(scrollable_frame,
+                                         text=folder.name,
+                                         variable=var,
+                                         onvalue=folder_path_str,
+                                         offvalue="")
+                    cb.pack(anchor="w", padx=10, pady=5)
+                    self.checkbox_vars[folder_path_str] = var
+
+        except Exception as e:
+            ctk.CTkLabel(scrollable_frame, text=f"读取目录时出错:\n{e}", text_color="red").pack()
+
+        self.status_label = ctk.CTkLabel(self, text="", text_color="green")
+        self.status_label.pack(padx=20, pady=(0, 5))
+
+        button_frame = ctk.CTkFrame(self, fg_color="transparent")
+        button_frame.pack(padx=20, pady=(5, 20), fill="x")
+        button_frame.grid_columnconfigure(0, weight=1)
+        
+        self.close_button = ctk.CTkButton(button_frame, text="关闭", command=self.close_dialog)
+        self.close_button.grid(row=0, column=2, padx=(10, 0))
+
+        self.save_button = ctk.CTkButton(button_frame, text="保存更改", command=self.save_changes)
+        self.save_button.grid(row=0, column=1)
+
+    def get_current_selection_set(self):
+        return {Path(var.get()).resolve() for var in self.checkbox_vars.values() if var.get()}
+
+    def save_changes(self):
+        current_selection_paths = list(self.get_current_selection_set())
+        self.parent_app.update_exclusions_from_dialog(current_selection_paths)
+        
+        self.initial_excluded_str = {str(p) for p in current_selection_paths}
+        
+        self.status_label.configure(text="更改已保存！")
+        self.after(3000, lambda: self.status_label.configure(text=""))
+
+    def close_dialog(self):
+        current_selection_str = {str(p) for p in self.get_current_selection_set()}
+        
+        if current_selection_str != self.initial_excluded_str:
+            if messagebox.askyesno("未保存的更改", "您有未保存的更改。确定要关闭吗？", parent=self):
+                self.destroy()
+        else:
+            self.destroy()
+
+
+class UsageDialog(ctk.CTkToplevel):
+    """查看和编辑API用量信息的对话框"""
+    def __init__(self, parent, backend):
+        super().__init__(parent)
+        self.backend = backend
+        self.tracker_data = self.backend.load_request_tracker(silent=True)
+
+        self.title("查看/编辑API用量")
+        self.geometry("500x400")
+        self.transient(parent)
+        self.grab_set()
+
+        self.date_entry = None
+        self.usage_entries = {}
+
+        current_keys_in_main_window = [k.strip() for k in parent.api_keys_entry.get().split(',') if k.strip()]
+        for key in current_keys_in_main_window:
+            if key not in self.tracker_data['usage']:
+                self.tracker_data['usage'][key] = 0
+
+        main_frame = ctk.CTkFrame(self)
+        main_frame.pack(expand=True, fill="both", padx=10, pady=10)
+        
+        date_frame = ctk.CTkFrame(main_frame)
+        date_frame.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(date_frame, text="记录日期 (YYYY-MM-DD):").pack(side="left", padx=5)
+        self.date_entry = ctk.CTkEntry(date_frame)
+        self.date_entry.insert(0, self.tracker_data.get("date", ""))
+        self.date_entry.pack(side="left", expand=True, fill="x", padx=5)
+
+        ctk.CTkLabel(main_frame, text="各API密钥已用请求数:").pack(anchor="w", padx=10, pady=(10,0))
+        scroll_frame = ctk.CTkScrollableFrame(main_frame)
+        scroll_frame.pack(expand=True, fill="both", padx=10, pady=5)
+
+        usage = self.tracker_data.get("usage", {})
+        if not usage:
+            ctk.CTkLabel(scroll_frame, text="暂无用量记录。").pack(pady=10)
+        else:
+            for key, count in usage.items():
+                key_frame = ctk.CTkFrame(scroll_frame)
+                key_frame.pack(fill="x", pady=2)
+                masked_key = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else key
+                ctk.CTkLabel(key_frame, text=masked_key, width=200, anchor="w").pack(side="left", padx=5)
+                entry = ctk.CTkEntry(key_frame)
+                entry.insert(0, str(count))
+                entry.pack(side="left", expand=True, fill="x", padx=5)
+                self.usage_entries[key] = entry
+        
+        button_frame = ctk.CTkFrame(self, fg_color="transparent")
+        button_frame.pack(fill="x", padx=10, pady=10)
+        ctk.CTkButton(button_frame, text="保存", command=self.save_changes).pack(side="right", padx=5)
+        ctk.CTkButton(button_frame, text="取消", command=self.destroy).pack(side="right", padx=5)
+
+    def save_changes(self):
+        new_data = {"date": self.date_entry.get(), "usage": {}}
+        try:
+            time.strptime(new_data["date"], '%Y-%m-%d')
+            for key, entry in self.usage_entries.items():
+                new_data["usage"][key] = int(entry.get())
+            
+            self.backend.save_request_tracker(new_data)
+            self.backend.log_to_gui("API用量信息已由用户手动更新。", "INFO")
+            messagebox.showinfo("成功", "API用量信息已更新。", parent=self)
+            self.destroy()
+        except ValueError:
+            messagebox.showerror("输入错误", "日期格式应为 YYYY-MM-DD，且用量必须为整数。", parent=self)
+        except Exception as e:
+            messagebox.showerror("保存失败", f"发生未知错误: {e}", parent=self)
+
+
+class App(ctk.CTk):
+    """主应用程序类"""
+    def __init__(self, backend_logic):
+        super().__init__()
+        self.backend = backend_logic
+        self.excluded_folders = []
+        self.progress_max = 0
+        self.progress_current = 0
+        self.single_mode_var = ctk.BooleanVar(value=False)
+        self.stop_event = threading.Event()
+        
+        # ===== 代理相关变量 =====
+        self.auto_proxy_var = ctk.BooleanVar(value=True)
+        self.manual_proxy_var = ctk.StringVar(value="")
+        # =========================
+
+        self.title("Gemini 智能文件重命名工具")
+        self.geometry("900x750")
+        ctk.set_appearance_mode("System")
+        ctk.set_default_color_theme("blue")
+
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+
+        self.create_widgets()
+        self.load_config()
+        self.check_queue_periodically()
+
+    def create_widgets(self):
+        settings_frame = ctk.CTkFrame(self)
+        settings_frame.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
+        settings_frame.grid_columnconfigure(1, weight=1)
+
+        # API Keys
+        ctk.CTkLabel(settings_frame, text="Google API Keys (逗号分隔):").grid(row=0, column=0, padx=10, pady=5, sticky="w")
+        self.api_keys_entry = ctk.CTkEntry(settings_frame, placeholder_text="key1,key2,...")
+        self.api_keys_entry.grid(row=0, column=1, columnspan=2, padx=10, pady=5, sticky="ew")
+        
+        # 目标文件夹
+        ctk.CTkLabel(settings_frame, text="目标文件夹:").grid(row=1, column=0, padx=10, pady=5, sticky="w")
+        self.dir_entry = ctk.CTkEntry(settings_frame, placeholder_text="尚未选择文件夹")
+        self.dir_entry.grid(row=1, column=1, padx=10, pady=5, sticky="ew")
+        self.browse_button = ctk.CTkButton(settings_frame, text="浏览...", command=self.browse_directory, width=100)
+        self.browse_button.grid(row=1, column=2, padx=(5,10), pady=5)
+        
+        # 功能操作
+        ctk.CTkLabel(settings_frame, text="功能操作:").grid(row=2, column=0, padx=10, pady=5, sticky="w")
+        button_group_frame = ctk.CTkFrame(settings_frame, fg_color="transparent")
+        button_group_frame.grid(row=2, column=1, columnspan=2, pady=5, sticky="w")
+        
+        self.exclusion_button = ctk.CTkButton(button_group_frame, text="选择排除文件夹...", command=self.open_exclusion_dialog)
+        self.exclusion_button.pack(side="left", padx=(0,5))
+        
+        self.usage_button = ctk.CTkButton(button_group_frame, text="查看/编辑API用量", command=self.open_usage_dialog)
+        self.usage_button.pack(side="left", padx=5)
+
+        self.single_mode_checkbox = ctk.CTkCheckBox(button_group_frame, text="以单文件模式处理 (较慢)", variable=self.single_mode_var)
+        self.single_mode_checkbox.pack(side="left", padx=15)
+
+        self.exclusion_status_label = ctk.CTkLabel(settings_frame, text="当前未排除任何文件夹。", text_color="gray")
+        self.exclusion_status_label.grid(row=3, column=1, columnspan=2, padx=10, pady=(0, 5), sticky="w")
+
+        # ===== 代理设置 UI =====
+        ctk.CTkLabel(settings_frame, text="代理设置:").grid(row=4, column=0, padx=10, pady=5, sticky="w")
+        
+        proxy_frame = ctk.CTkFrame(settings_frame, fg_color="transparent")
+        proxy_frame.grid(row=4, column=1, columnspan=2, pady=5, sticky="w")
+        
+        self.auto_proxy_checkbox = ctk.CTkCheckBox(
+            proxy_frame, 
+            text="自动检测系统代理", 
+            variable=self.auto_proxy_var,
+            command=self.on_proxy_mode_change
+        )
+        self.auto_proxy_checkbox.pack(side="left", padx=(0, 15))
+        
+        ctk.CTkLabel(proxy_frame, text="手动代理:").pack(side="left", padx=(0, 5))
+        self.proxy_entry = ctk.CTkEntry(proxy_frame, placeholder_text="如 http://127.0.0.1:7890", width=200, textvariable=self.manual_proxy_var)
+        self.proxy_entry.pack(side="left", padx=(0, 10))
+        
+        self.detect_proxy_button = ctk.CTkButton(
+            proxy_frame, 
+            text="检测代理", 
+            command=self.detect_and_show_proxy,
+            width=80
+        )
+        self.detect_proxy_button.pack(side="left")
+        
+        # 代理状态标签
+        self.proxy_status_label = ctk.CTkLabel(settings_frame, text="代理状态: 未检测", text_color="gray")
+        self.proxy_status_label.grid(row=5, column=1, columnspan=2, padx=10, pady=(0, 5), sticky="w")
+        # =========================
+        
+        # 日志区域
+        log_frame = ctk.CTkFrame(self)
+        log_frame.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="nsew")
+        log_frame.grid_rowconfigure(0, weight=1)
+        log_frame.grid_columnconfigure(0, weight=1)
+        self.log_textbox = ctk.CTkTextbox(log_frame, state="disabled", wrap="word")
+        self.log_textbox.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+
+        # 控制区域
+        control_frame = ctk.CTkFrame(self)
+        control_frame.grid(row=2, column=0, padx=10, pady=(0,10), sticky="ew")
+        control_frame.grid_columnconfigure(0, weight=1)
+        control_frame.grid_columnconfigure(1, weight=1)
+        
+        self.progressbar = ctk.CTkProgressBar(control_frame)
+        self.progressbar.grid(row=0, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+        self.progressbar.set(0)
+        
+        self.start_button = ctk.CTkButton(control_frame, text="开始重命名", command=self.start_processing_thread, height=35)
+        self.start_button.grid(row=1, column=0, padx=10, pady=10, sticky="ew")
+
+        self.stop_button = ctk.CTkButton(control_frame, text="终止", command=self.stop_processing, height=35, fg_color="red", hover_color="darkred", state="disabled")
+        self.stop_button.grid(row=1, column=1, padx=10, pady=10, sticky="ew")
+
+    # ===== 代理相关方法 =====
+    def on_proxy_mode_change(self):
+        """当代理模式切换时调用"""
+        if self.auto_proxy_var.get():
+            self.proxy_entry.configure(state="disabled")
+            self.detect_and_show_proxy()
+        else:
+            self.proxy_entry.configure(state="normal")
+            self.proxy_status_label.configure(text="代理状态: 使用手动配置", text_color="orange")
+
+    def detect_and_show_proxy(self):
+        """检测并显示代理状态"""
+        detected = ProxyDetector.detect()
+        if detected:
+            self.proxy_status_label.configure(
+                text=f"代理状态: 已检测到 {detected}", 
+                text_color="green"
+            )
+            if self.auto_proxy_var.get():
+                self.manual_proxy_var.set(detected)
+            self.log(f"检测到系统代理: {detected}")
+        else:
+            self.proxy_status_label.configure(
+                text="代理状态: 未检测到系统代理", 
+                text_color="gray"
+            )
+            self.log("未检测到系统代理，将直接连接")
+
+    def get_effective_proxy(self):
+        """获取当前生效的代理地址"""
+        if self.auto_proxy_var.get():
+            return ProxyDetector.detect() or ""
+        else:
+            return self.manual_proxy_var.get().strip()
+
+    def get_proxy_settings(self):
+        """获取代理设置字典"""
+        return {
+            'auto': self.auto_proxy_var.get(),
+            'manual': self.manual_proxy_var.get().strip()
+        }
+    # =========================
+
+    def open_usage_dialog(self):
+        UsageDialog(self, self.backend)
+
+    def browse_directory(self):
+        current_dir = self.dir_entry.get()
+        dir_path = filedialog.askdirectory(title="请选择包含文件的文件夹")
+
+        if dir_path and dir_path != current_dir:
+            self.dir_entry.delete(0, "end")
+            self.dir_entry.insert(0, dir_path)
+            self.excluded_folders = []
+            self.update_exclusion_status_label()
+            self.log(f"已选择新文件夹: {dir_path}")
+            self.log("排除列表已因此重置。")
+
+    def open_exclusion_dialog(self):
+        target_dir = self.dir_entry.get()
+        if not target_dir or not Path(target_dir).is_dir():
+            messagebox.showerror("错误", "请先选择一个有效的目标文件夹。")
+            return
+        ExclusionDialog(self, target_dir)
+
+    def update_exclusions_from_dialog(self, excluded_list):
+        self.excluded_folders = excluded_list
+        self.update_exclusion_status_label()
+        self.save_config()
+        self.log("排除列表已更新。")
+            
+    def update_exclusion_status_label(self):
+        if not self.excluded_folders:
+            self.exclusion_status_label.configure(text="当前未排除任何文件夹。", text_color="gray")
+        else:
+            count = len(self.excluded_folders)
+            folder_names = ", ".join(f.name for f in self.excluded_folders)
+            self.exclusion_status_label.configure(text=f"已排除 {count} 个文件夹: {folder_names}", text_color=("black", "white"))
+
+    def load_config(self):
+        try:
+            if Path(CONFIG_FILE).exists():
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                
+                api_keys_from_config = config.get("api_keys", "")
+                if api_keys_from_config:
+                    cleaned_api_keys = api_keys_from_config.strip()
+                    self.api_keys_entry.insert(0, cleaned_api_keys)
+                
+                target_dir = config.get("target_directory", "")
+                if target_dir:
+                    self.dir_entry.insert(0, target_dir)
+                
+                excluded_paths_str = config.get("excluded_folders", [])
+                if excluded_paths_str:
+                    self.excluded_folders = [Path(p) for p in excluded_paths_str]
+                    self.update_exclusion_status_label()
+
+                # ===== 加载代理配置 =====
+                self.auto_proxy_var.set(config.get("auto_proxy", True))
+                manual_proxy = config.get("manual_proxy", "")
+                if manual_proxy:
+                    self.manual_proxy_var.set(manual_proxy)
+                
+                # 根据模式更新UI状态
+                if self.auto_proxy_var.get():
+                    self.proxy_entry.configure(state="disabled")
+                    self.after(500, self.detect_and_show_proxy)
+                else:
+                    self.proxy_entry.configure(state="normal")
+                    self.proxy_status_label.configure(text="代理状态: 使用手动配置", text_color="orange")
+                # =========================
+
+                self.log("已从 config.json 加载保存的配置。")
+        except Exception as e:
+            self.log(f"无法加载配置文件: {e}", "ERROR")
+
+    def save_config(self):
+        try:
+            config_data = {
+                "api_keys": self.api_keys_entry.get(),
+                "target_directory": self.dir_entry.get(),
+                "excluded_folders": [str(p.resolve()) for p in self.excluded_folders],
+                # ===== 保存代理配置 =====
+                "auto_proxy": self.auto_proxy_var.get(),
+                "manual_proxy": self.manual_proxy_var.get().strip(),
+                # =========================
+            }
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config_data, f, indent=4)
+        except Exception as e:
+            self.log(f"无法保存配置文件: {e}", "ERROR")
+
+    def log(self, message, level="INFO"):
+        self.log_textbox.configure(state="normal")
+        self.log_textbox.insert("end", f"{message}\n")
+        self.log_textbox.see("end")
+        self.log_textbox.configure(state="disabled")
+
+    def start_processing_thread(self):
+        self.save_config()
+        self.stop_event.clear()
+        
+        # ===== 获取代理设置 =====
+        proxy_settings = self.get_proxy_settings()
+        proxy = self.get_effective_proxy()
+        if proxy:
+            self.log(f"将使用代理: {proxy}")
+        else:
+            self.log("未配置代理，将直接连接 Google API")
+        # =========================
+        
+        self.start_button.configure(state="disabled", text="正在处理中...")
+        self.stop_button.configure(state="normal")
+        self.progressbar.set(0)
+        self.progress_max = 0
+        self.progress_current = 0
+        self.log_textbox.configure(state="normal")
+        self.log_textbox.delete("1.0", "end")
+        self.log_textbox.configure(state="disabled")
+        
+        threading.Thread(
+            target=lambda: asyncio.run(self.backend.run_processing(
+                self.api_keys_entry.get(),
+                self.dir_entry.get(),
+                self.excluded_folders,
+                self.single_mode_var.get(),
+                self.stop_event,
+                proxy_settings  # 传递代理设置
+            )),
+            daemon=True
+        ).start()
     
-    def _update_log(self) -> None:
-        """Update log from queue / 从队列更新日志"""
+    def stop_processing(self):
+        self.log("用户请求终止...将在当前操作完成后停止。", "WARNING")
+        self.stop_event.set()
+        self.stop_button.configure(state="disabled", text="正在终止...")
+
+    def check_queue_periodically(self):
         try:
             while True:
-                message = self.log_queue.get_nowait()
-                self._log(message)
+                message = self.backend.gui_queue.get_nowait()
+                if isinstance(message, tuple):
+                    command, value = message
+                    if command == "set_progress_max":
+                        self.progress_max = value if value > 0 else 1
+                        self.progress_current = 0
+                        self.progressbar.set(0)
+                    elif command == "progress_update":
+                        self.progress_current += value
+                        if self.progress_max > 0:
+                            self.progressbar.set(self.progress_current / self.progress_max)
+                    elif command == "processing_finished":
+                        self.start_button.configure(state="normal", text="开始重命名")
+                        self.stop_button.configure(state="disabled", text="终止")
+                        if self.progressbar.get() < 1.0:
+                             self.progressbar.set(1.0)
+                else:
+                    self.log(message)
         except queue.Empty:
             pass
-        self.root.after(100, self._update_log)
-    
-    def _update_progress(self, current: int, total: int, message: str = "") -> None:
-        """Update progress / 更新进度"""
-        self.progress_bar["maximum"] = total
-        self.progress_bar["value"] = current
-        
-        if message:
-            self.widgets['progress_label'].configure(text=message)
-        else:
-            percent = (current / total * 100) if total > 0 else 0
-            self.widgets['progress_label'].configure(
-                text=self.i18n.get('progress', current=current, total=total, percent=percent)
-            )
-    
-    def _start_processing(self) -> None:
-        """Start processing / 开始处理"""
-        if self.is_processing:
-            return
-        
-        if not self.api_keys.get().strip():
-            messagebox.showerror(self.i18n.get('error'), self.i18n.get('api_key_required'))
-            return
-        
-        if not self.target_dir.get().strip():
-            messagebox.showerror(self.i18n.get('error'), self.i18n.get('dir_required'))
-            return
-        
-        target_path = Path(self.target_dir.get())
-        if not target_path.is_dir():
-            messagebox.showerror(self.i18n.get('error'), self.i18n.get('dir_not_exist'))
-            return
-        
-        self.is_processing = True
-        self.widgets['start_btn'].configure(state="disabled", text=self.i18n.get('processing_btn'))
-        self._clear_log()
-        
-        thread = threading.Thread(target=self._run_processing, daemon=True)
-        thread.start()
-    
-    def _run_processing(self) -> None:
-        """Run processing in new thread / 在新线程中运行处理"""
-        try:
-            asyncio.run(self._async_processing())
-        except Exception as e:
-            self.logger.error(self.i18n.get('processing_error', error=e))
         finally:
-            self.root.after(0, self._processing_complete)
-    
-    async def _async_processing(self) -> None:
-        """Async processing main logic / 异步处理主逻辑"""
-        keys = [k.strip() for k in self.api_keys.get().split(',') if k.strip()]
-        if not keys:
-            self.logger.error(self.i18n.get('no_valid_keys'))
-            return
-        
-        key_manager = APIKeyManager(keys, CONFIG.tracker_file)
-        self.logger.info(self.i18n.get('api_keys_found', count=len(keys)))
-        
-        target_dir = Path(self.target_dir.get())
-        mode = ProcessingMode.BATCH if self.mode.get() == "batch" else ProcessingMode.SINGLE
-        write_metadata = self.write_metadata.get()
-        
-        mode_str = self.i18n.get('mode_batch') if mode == ProcessingMode.BATCH else self.i18n.get('mode_single')
-        self.logger.info(self.i18n.get('processing_mode_log', mode=mode_str))
-        
-        metadata_status = self.i18n.get('metadata_enabled') if write_metadata else self.i18n.get('metadata_disabled')
-        self.logger.info(self.i18n.get('metadata_log', status=metadata_status))
-        
-        pending_manager = PendingFilesManager(CONFIG.pending_files_log)
-        pending = pending_manager.load()
-        
-        if pending:
-            self.logger.info(self.i18n.get('resume_from_breakpoint', count=len(pending)))
-            file_paths = [p for p in pending if p.exists()]
-        else:
-            file_paths = []
-            for ext in CONFIG.supported_extensions:
-                file_paths.extend(target_dir.glob(f"**/*{ext}"))
-            file_paths = sorted(file_paths, key=str)
-        
-        if not file_paths:
-            self.logger.info(self.i18n.get('no_files_to_process'))
-            return
-        
-        self.logger.info(self.i18n.get('files_to_process', count=len(file_paths)))
-        self.root.after(0, lambda: self._update_progress(0, len(file_paths), self.i18n.get('preparing')))
-        
-        for key in keys:
-            if MODEL.configure(key):
-                self.logger.info(self.i18n.get('api_configured'))
-                break
-        else:
-            self.logger.error(self.i18n.get('all_keys_invalid'))
-            return
-        
-        self.logger.info(self.i18n.get('extracting_text'))
-        loop = asyncio.get_running_loop()
-        file_items = []
-        
-        with ThreadPoolExecutor(max_workers=CONFIG.io_workers) as pool:
-            tasks = [loop.run_in_executor(pool, extract_and_count, p, CONFIG) for p in file_paths]
-            results = await asyncio.gather(*tasks)
-        
-        for result in results:
-            if result and result.tokens <= CONFIG.max_tokens_per_request:
-                file_items.append(result)
-        
-        self.logger.info(self.i18n.get('extracted_files', count=len(file_items)))
-        
-        if not file_items:
-            self.logger.warning(self.i18n.get('no_content_extracted'))
-            return
-        
-        limiter = RateLimiter(CONFIG.rpm_limit, CONFIG.tpm_limit)
-        renamer = FileRenamer(write_metadata)
-        processor = FileProcessor(CONFIG, limiter, renamer, self.logger, self.i18n)
-        
-        remaining: Deque[FileItem] = deque(file_items)
-        total_processed = 0
-        processed_count = 0
-        
-        def update_progress(count: int):
-            nonlocal processed_count
-            processed_count += count
-            self.root.after(0, lambda: self._update_progress(
-                processed_count, len(file_items), self.i18n.get('processing')
-            ))
-        
-        for key_idx, api_key in enumerate(keys):
-            if not remaining:
-                break
+            self.after(100, self.check_queue_periodically)
             
-            self.logger.info(self.i18n.get('using_key', idx=key_idx + 1, total=len(keys)))
-            
-            if not MODEL.configure(api_key):
-                continue
-            
-            quota = key_manager.get_remaining_quota(api_key, CONFIG.daily_request_limit)
-            if quota <= 0:
-                self.logger.warning(self.i18n.get('quota_exhausted'))
-                continue
-            
-            self.logger.info(self.i18n.get('remaining_quota', quota=quota))
-            
-            current_items = list(remaining)
-            remaining = deque()
-            
-            if mode == ProcessingMode.BATCH:
-                batches = pack_batches_ffd(current_items, CONFIG.max_tokens_per_request, CONFIG.max_items_per_batch)
-                batches_to_process = batches[:quota]
-                for b in batches[quota:]:
-                    remaining.extend(b.items)
-                
-                for batch in batches_to_process:
-                    key_manager.increment_usage(api_key)
-                    result = await processor.process_batch(batch, update_progress)
-                    
-                    if result.success:
-                        total_processed += len(batch.items)
-                    else:
-                        remaining.extend(result.failed_items)
-                        if result.quota_exceeded:
-                            break
-            else:
-                for item in current_items:
-                    if quota <= 0:
-                        remaining.append(item)
-                        continue
-                    
-                    key_manager.increment_usage(api_key)
-                    quota -= 1
-                    
-                    result = await processor.process_single(item, update_progress)
-                    
-                    if result.success:
-                        total_processed += 1
-                    else:
-                        if result.failed_item:
-                            remaining.append(result.failed_item)
-                        if result.quota_exceeded:
-                            remaining.extend(current_items[current_items.index(item) + 1:])
-                            break
-            
-            key_manager.save_tracker()
-        
-        if remaining:
-            pending_manager.save([item.path for item in remaining])
-            self.logger.warning(self.i18n.get('remaining_files', count=len(remaining)))
-        else:
-            pending_manager.clear()
-        
-        self.logger.info(self.i18n.get('completed', count=total_processed))
-    
-    def _processing_complete(self) -> None:
-        """Processing complete callback / 处理完成回调"""
-        self.is_processing = False
-        self.widgets['start_btn'].configure(state="normal", text=self.i18n.get('start'))
-        self._update_file_count()
-    
-    def run(self) -> None:
-        """Run application / 运行应用"""
-        self.root.update_idletasks()
-        width = self.root.winfo_width()
-        height = self.root.winfo_height()
-        x = (self.root.winfo_screenwidth() // 2) - (width // 2)
-        y = (self.root.winfo_screenheight() // 2) - (height // 2)
-        self.root.geometry(f"{width}x{height}+{x}+{y}")
-        
-        self.root.mainloop()
-
-
-# ============================================================================
-# Main Entry / 主入口
-# ============================================================================
-
-def main():
-    """Main entry function / 主入口函数"""
-    app = GeminiRenamerGUI()
-    app.run()
+    def on_closing(self):
+        self.save_config()
+        self.destroy()
 
 
 if __name__ == "__main__":
-    main()
+    def handle_exception(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        
+        import traceback
+        error_details = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+        print("Unhandled exception caught:\n" + error_details)
+        
+        try:
+            messagebox.showerror("未捕获的异常", f"发生了一个严重错误:\n\n{exc_type.__name__}: {exc_value}\n\n详细信息已打印到控制台。")
+        except Exception:
+            pass
+
+    sys.excepthook = handle_exception
+    
+    backend = Backend(gui_queue=queue.Queue())
+    app = App(backend)
+    app.protocol("WM_DELETE_WINDOW", app.on_closing)
+    app.mainloop()
