@@ -1,20 +1,57 @@
-+# Gemini File Renamer Project Guide (English)
++# Gemini File Renamer Guide (English)
+
+
++## Table of Contents (English)
++- [Overview](#overview)
++- [Requirements](#requirements)
++- [Get and Configure the API Key](#get-and-configure-the-api-key)
++- [CLI Usage](#cli-usage)
++- [GUI Usage](#gui-usage)
++- [Filename Template](#filename-template)
++- [Quotas and Rate Limiting](#quotas-and-rate-limiting)
++- [Text Extraction Scope](#text-extraction-scope)
++- [Tips](#tips)
++- [Chinese Section](#gemini-文件重命名工具说明中文)
 +
+
+
 +## Overview
+
+
 +- Uses the Google Gemini API to batch-rename PDF, EPUB, AZW3, DOCX, and similar documents by extracting title, authors, publisher/journal, publication date, and related metadata.
+
+
 +- Supports both the CLI script `gemini_file_renamer.py` and the GUI `gemini_file_renamer_gui.py`, each with bilingual labels.
-+- Includes rate limiting, retries, resume support, and filename templating to keep names consistent.
+
+
++- Includes rate limiting, retries, resume support, and filename templating for consistent naming.
 +
+
+
 +## Requirements
+
+
 +- Python 3.8+
+
+
 +- Install dependencies:
+
+
 +  ```bash
 +  pip install google-generativeai pymupdf pathvalidate tqdm python-docx EbookLib beautifulsoup4
 +  ```
+
+
 +- Ensure access to the Google Gemini API and prepare `GOOGLE_API_KEY`.
 +
-+## Obtain & Configure API Key
+
+
++## Get and Configure the API Key
+
+
 +1. Visit Google AI Studio and create an API key.
+
+
 +2. Set the key as an environment variable:
 +   - macOS/Linux:
 +     ```bash
@@ -24,6 +61,8 @@
 +     ```powershell
 +     $env:GOOGLE_API_KEY="<your_api_key>"
 +     ```
+
+
 +3. If the variable is missing, the script prompts for the key at runtime.
 +
 +## CLI Usage
@@ -36,8 +75,11 @@
 +   ```bash
 +   python gemini_file_renamer.py "/path/to/your/documents"
 +   ```
+
+
 +4. Files are safely renamed in place; conflicts automatically get suffixes.
 +
+
 +## GUI Usage
 +- Launch after installing dependencies:
 +  ```bash
@@ -50,7 +92,7 @@
 +  - Multiple API key rotation and resume support.
 +
 +## Filename Template
-+- Control file naming with the `FILENAME_TEMPLATE` environment variable; default: `"{title} - {authors} ({optional})"`.
++- Control file naming with the `FILENAME_TEMPLATE` environment variable. Default: `"{title} - {authors} ({optional})"`.
 +- `{optional}` combines translators, editors, publisher/journal, volume/issue, publication year, and start page when present.
 +- Example customization:
 +  ```bash
@@ -58,11 +100,11 @@
 +  python gemini_file_renamer.py
 +  ```
 +
-+## Quotas & Rate Limiting
++## Quotas and Rate Limiting
 +- Default RPM/TPM checks run before each call, and daily totals are tracked in `request_tracker.json`.
 +- Automatic retries with exponential backoff handle quota or API failures.
 +
-+## Text Extraction
++## Text Extraction Scope
 +- Defaults: PDF first 4 and last 3 pages; DOCX first 20 and last 15 paragraphs; EPUB/AZW3 first 5 and last 4 chapters.
 +- Adjust these limits in the script to suit specific documents.
 +
@@ -73,6 +115,19 @@
 +---
 +
 +# Gemini 文件重命名工具说明（中文）
++
++本部分与英文说明完全分开，便于在 GitHub 上直接复制中文内容。
++
++## 目录（中文）
++- [项目概览](#项目概览)
++- [环境要求](#环境要求)
++- [获取与配置-api-密钥](#获取与配置-api-密钥)
++- [命令行用法](#命令行用法)
++- [图形界面用法](#图形界面用法)
++- [自定义文件名模板](#自定义文件名模板)
++- [配额与速率限制](#配额与速率限制)
++- [文本提取范围](#文本提取范围)
++- [常见提示](#常见提示)
 +
 +## 项目概览
 +- 利用 Google Gemini API 批量重命名 PDF、EPUB、AZW3、DOCX 等文档，自动提取标题、作者、出版社/期刊、出版日期等元数据。
@@ -141,5 +196,8 @@
 +- 可在脚本中调整这些数量以适配具体文档。
 +
 +## 常见提示
-+- 如需更高质量，可将模型从 `gemini-2.5-flash` 替换为更高精度的 `gemini-2.5-pro`（速度较慢）。
++- 如需更高质量，可将模型从 `gemini-2.5-flash` 替换为 `gemini-2.5-pro`（速度较慢）。
 +- 批处理前建议备份重要文件，并确保输出目录有足够的写入权限。
+ 
+EOF
+)
