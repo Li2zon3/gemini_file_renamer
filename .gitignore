@@ -2,7 +2,15 @@
 __pycache__/
 *.pyc
 
+# App runtime files
+pending_files.txt
+request_tracker.json
+budget_tracker.json
+config.json
+
 # IDE / Editor
 .idea/
 .vscode/
 
+# macOS
+.DS_Store

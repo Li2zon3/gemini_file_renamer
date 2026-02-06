@@ -1,239 +1,154 @@
-+# Gemini File Renamer Guide (English)
+# Gemini File Renamer (CLI + GUI)
+
+## Overview
+- Batch-rename PDF/EPUB/AZW3/DOCX files using Google Gemini: extract title/authors/publisher/journal/date/keywords and generate a safe filename.
+- Two entrypoints:
+  - CLI: `gemini_file_renamer.py`
+  - GUI: `gemini_file_renamer_gui.py`
+- Features: rate limiting, retries, resume (`pending_files.txt`), optional metadata writing, and template-based filenames.
+
+## Requirements
+- Python 3.8+
+- Install dependencies:
+  ```bash
+  pip install -r requirements.txt
+  ```
+- Set `GOOGLE_API_KEY` (supports multiple keys, comma-separated):
+  ```bash
+  export GOOGLE_API_KEY="key1,key2"
+  ```
+
+## CLI Quickstart
+- Process a directory (default: `./files_to_rename`):
+  ```bash
+  python gemini_file_renamer.py "/path/to/your/documents"
+  ```
+- Processing mode:
+  - `--mode batch` (default): pack multiple files into one request
+  - `--mode single`: one file per request (concurrent)
+  - `--mode auto`: choose single vs batch automatically (speed-first)
+
+### Paid Tier (Gemini 3 Flash Preview)
+- Enable paid tier (defaults: `$10/Key/month`, model `gemini-3-flash-preview`, context hard cap 200k):
+  ```bash
+  python gemini_file_renamer.py "/path/to/your/documents" --tier paid --mode auto
+  ```
+- Economy mode (cost-first): in `--mode auto`, prefer batching to reduce repeated prompt/thinking overhead:
+  ```bash
+  python gemini_file_renamer.py "/path/to/your/documents" --tier paid --mode auto --paid-economy
+  ```
+- When paid budget is exhausted, default behavior is to auto-downgrade to the free model. You can stop instead:
+  ```bash
+  python gemini_file_renamer.py "/path/to/your/documents" --tier paid --on-budget-exceeded stop
+  ```
+- Show current month budget usage (no raw keys are printed):
+  ```bash
+  python gemini_file_renamer.py --show-budget --budget-file ./budget_tracker.json
+  ```
+
+## GUI Quickstart
+- Launch:
+  ```bash
+  python gemini_file_renamer_gui.py
+  ```
+- Processing mode: Auto / Batch / Single
+- Paid mode (optional): Gemini 3 Flash + monthly budget ($/Key/month) + concurrency + optional economy mode
+
+### GUI Note (Tkinter)
+- The GUI requires a Python build with Tk support.
+- If your venv cannot `import tkinter` (missing `_tkinter`), create a new venv using a Tk-enabled Python:
+  ```bash
+  /usr/bin/python3 -m venv .venv-tk
+  source .venv-tk/bin/activate
+  pip install -r requirements.txt
+  python gemini_file_renamer_gui.py
+  ```
+
+## Runtime State Files
+- `request_tracker.json`: daily request counter per key (stores only `key_id`, not raw keys)
+- `budget_tracker.json`: monthly spend per key (stores only `key_id`, nanos USD integer)
+- `pending_files.txt`: resume list when some files were not processed
+- `config.json`: GUI settings
+
+## Security & Privacy
+- API keys are never written to disk.
+- Trackers store only a short `key_id` (sha256 prefix), not raw keys.
+
+---
+
+# Gemini 文件重命名工具（CLI + GUI）
+
+## 项目概览
+- 使用 Google Gemini 对 PDF/EPUB/AZW3/DOCX 等文档批量重命名：提取标题/作者/出版社或期刊/日期/关键词，并生成安全文件名。
+- 两个入口：
+  - 命令行：`gemini_file_renamer.py`
+  - 图形界面：`gemini_file_renamer_gui.py`
+- 功能：速率限制、重试、断点续传（`pending_files.txt`）、可选写入元数据、文件名模板等。
+
+## 环境要求
+- Python 3.8+
+- 安装依赖：
+  ```bash
+  pip install -r requirements.txt
+  ```
+- 设置 `GOOGLE_API_KEY`（支持多个 key，用逗号分隔）：
+  ```bash
+  export GOOGLE_API_KEY="key1,key2"
+  ```
+
+## CLI 快速开始
+- 处理目录（默认：`./files_to_rename`）：
+  ```bash
+  python gemini_file_renamer.py "/path/to/your/documents"
+  ```
+- 处理模式：
+  - `--mode batch`（默认）：批处理打包多个文件
+  - `--mode single`：单文件请求（并发）
+  - `--mode auto`：自动选择（速度优先：少量文件单文件并发，大量文件批处理）
+
+### 付费模式（Gemini 3 Flash Preview）
+- 开启付费模式（默认：`$10/Key/月`，模型 `gemini-3-flash-preview`，上下文硬上限 200k）：
+  ```bash
+  python gemini_file_renamer.py "/path/to/your/documents" --tier paid --mode auto
+  ```
+- 省钱模式（费用优先）：在 `--mode auto` 下尽量走批处理，减少重复 prompt/thinking 开销：
+  ```bash
+  python gemini_file_renamer.py "/path/to/your/documents" --tier paid --mode auto --paid-economy
+  ```
+- 付费预算耗尽后默认自动降级到免费模型继续处理；也可选择停止：
+  ```bash
+  python gemini_file_renamer.py "/path/to/your/documents" --tier paid --on-budget-exceeded stop
+  ```
+- 查看本月预算用量（不会显示明文 key）：
+  ```bash
+  python gemini_file_renamer.py --show-budget --budget-file ./budget_tracker.json
+  ```
+
+## GUI 快速开始
+- 启动：
+  ```bash
+  python gemini_file_renamer_gui.py
+  ```
+- 处理模式：自动 / 批处理 / 单文件
+- 付费模式：Gemini 3 Flash + 月预算（$/Key/月）+ 并发 + 可选省钱模式
+
+### GUI 说明（Tkinter）
+- GUI 需要带 Tk 支持的 Python。
+- 如果当前 venv 无法 `import tkinter`（缺 `_tkinter`），请用带 Tk 的 Python 创建 venv：
+  ```bash
+  /usr/bin/python3 -m venv .venv-tk
+  source .venv-tk/bin/activate
+  pip install -r requirements.txt
+  python gemini_file_renamer_gui.py
+  ```
+
+## 运行时状态文件
+- `request_tracker.json`：按 key 记录每日请求次数（只保存 `key_id`，不保存明文 key）
+- `budget_tracker.json`：按 key 记录本月预算用量（只保存 `key_id`，金额用 nanos USD 整数）
+- `pending_files.txt`：未处理完成时的断点续传列表
+- `config.json`：GUI 配置
+
+## 安全与隐私
+- 程序不会把 API key 写入磁盘。
+- 各种 tracker 只保存 `key_id`（sha256 前缀），不保存明文 key。
 
-
-+## Table of Contents (English)
-+- [Overview](#overview)
-+- [Requirements](#requirements)
-+- [Get and Configure the API Key](#get-and-configure-the-api-key)
-+- [CLI Usage](#cli-usage)
-+- [GUI Usage](#gui-usage)
-+- [Filename Template](#filename-template)
-+- [Quotas and Rate Limiting](#quotas-and-rate-limiting)
-+- [Text Extraction Scope](#text-extraction-scope)
-+- [Tips](#tips)
-+- [Chinese Section](#gemini-文件重命名工具说明中文)
-+
-
-
-+## Overview
-
-
-+- Uses the Google Gemini API to batch-rename PDF, EPUB, AZW3, DOCX, and similar documents by extracting title, authors, publisher/journal, publication date, and related metadata.
-
-
-+- Supports both the CLI script `gemini_file_renamer.py` and the GUI `gemini_file_renamer_gui.py`, each with bilingual labels.
-
-
-+- Includes rate limiting, retries, resume support, and filename templating for consistent naming.
-+
-
-
-+## Requirements
-
-
-+- Python 3.8+
-
-
-+- Install dependencies:
-
-
-+  ```bash
-   pip install google-generativeai pymupdf pathvalidate tqdm python-docx EbookLib beautifulsoup4
-+  ```
-
-
-+- Ensure access to the Google Gemini API and prepare `GOOGLE_API_KEY`.
-+
-
-
-+## Get and Configure the API Key
-
-
-+1. Visit Google AI Studio and create an API key.
-
-
-+2. Set the key as an environment variable:
-+   - macOS/Linux:
-+     ```bash
-+     export GOOGLE_API_KEY="<your_api_key>"
-+     ```
-+   - Windows (PowerShell):
-+     ```powershell
-+     $env:GOOGLE_API_KEY="<your_api_key>"
-+     ```
-
-
-+3. If the variable is missing, the script prompts for the key at runtime.
-+
-+## CLI Usage
-+1. Place files to rename in `files_to_rename` or pass a custom directory at runtime.
-+2. Run with the default directory:
-+   ```bash
-    python gemini_file_renamer.py
-+   ```
-+3. Specify a directory explicitly:
-+   ```bash
-    python gemini_file_renamer.py "/path/to/your/documents"
-+   ```
-
-
-+4. Files are safely renamed in place; conflicts automatically get suffixes.
-+
-
-
-+## GUI Usage
-+- Launch after installing dependencies:
-+  ```bash
-   python gemini_file_renamer_gui.py
-+  ```
-
-
-+- Features:
-+  - Bilingual interface with drag-and-drop folder selection.
-+  - Switch between batch and single-file modes.
-+  - Real-time progress/log display and optional metadata writing.
-+  - Multiple API key rotation and resume support.
-+
-
-
-+## Filename Template
-+- Control file naming with the `FILENAME_TEMPLATE` environment variable. Default: `"{title} - {authors} ({optional})"`.
-+- `{optional}` combines translators, editors, publisher/journal, volume/issue, publication year, and start page when present.
-+- Example customization:
-+  ```bash
-   export FILENAME_TEMPLATE="{authors} - {title} ({publication_date})"
-   python gemini_file_renamer.py
-+  ```
-+
-
-+## Quotas and Rate Limiting
-+- Default RPM/TPM checks run before each call, and daily totals are tracked in `request_tracker.json`.
-+- Automatic retries with exponential backoff handle quota or API failures.
-+
-
-+## Text Extraction Scope
-+- Defaults: PDF first 4 and last 3 pages; DOCX first 20 and last 15 paragraphs; EPUB/AZW3 first 5 and last 4 chapters.
-+- Adjust these limits in the script to suit specific documents.
-+
-
-+## Tips
-+- For better quality, switch from `gemini-2.5-flash` to `gemini-2.5-pro` at the cost of speed.
-+- Back up important files and ensure write permissions before batch runs.
-+
-+---
-+
-
-
-
-+# Gemini 文件重命名工具说明（中文）
-+
-
-
-+## 目录（中文）
-+- [项目概览](#项目概览)
-+- [环境要求](#环境要求)
-+- [获取与配置-api-密钥](#获取与配置-api-密钥)
-+- [命令行用法](#命令行用法)
-+- [图形界面用法](#图形界面用法)
-+- [自定义文件名模板](#自定义文件名模板)
-+- [配额与速率限制](#配额与速率限制)
-+- [文本提取范围](#文本提取范围)
-+- [常见提示](#常见提示)
-+
-
-
-+## 项目概览
-+- 利用 Google Gemini API 批量重命名 PDF、EPUB、AZW3、DOCX 等文档，自动提取标题、作者、出版社/期刊、出版日期等元数据。
-+- 支持命令行脚本 `gemini_file_renamer.py` 与图形界面 `gemini_file_renamer_gui.py`，界面提供中英文标签。
-+- 内置速率限制、重试、断点续传与文件名模板化，帮助生成一致规范的文件名。
-+
-
-
-+## 环境要求
-+- Python 3.8+
-+- 安装依赖：
-+  ```bash
-   pip install google-generativeai pymupdf pathvalidate tqdm python-docx EbookLib beautifulsoup4
-+  ```
-
-
-+- 请确保可访问 Google Gemini API，并准备好 `GOOGLE_API_KEY`。
-+
-
-
-+## 获取与配置 API 密钥
-+1. 登录 Google AI Studio，创建 API key。
-+2. 将密钥设置为环境变量：
-+   - macOS/Linux:
-+     ```bash
-+     export GOOGLE_API_KEY="<your_api_key>"
-+     ```
-+   - Windows (PowerShell):
-+     ```powershell
-+     $env:GOOGLE_API_KEY="<your_api_key>"
-+     ```
-
-
-+3. 若未设置环境变量，脚本会在运行时提示输入。
-+
-+## 命令行用法
-
-
-+1. 将待重命名文件放入 `files_to_rename` 目录，或在运行时指定自定义目录。
-
-
-+2. 运行默认目录：
-+   ```bash
-    python gemini_file_renamer.py
-+   ```
-+3. 指定目录：
-+   ```bash
-    python gemini_file_renamer.py "/path/to/your/documents"
-+   ```
-
-
-+4. 处理完成后，文件会在原目录内被安全重命名；若重名则自动添加后缀。
-+
-
-
-+## 图形界面用法
-+- 启动（需已安装依赖）：
-+  ```bash
-   python gemini_file_renamer_gui.py
-+  ```
-
-
-+- 功能：
-+  - 中英文界面与拖拽选择文件夹。
-+  - 批处理与单文件模式切换。
-+  - 实时进度、日志展示与可选的元数据写入。
-+  - 支持多 API 密钥轮换与断点续传。
-+
-
-
-+## 自定义文件名模板
-+- 通过环境变量 `FILENAME_TEMPLATE` 控制文件名格式，默认模板：`"{title} - {authors} ({optional})"`。
-+- `{optional}` 会自动组合译者、编者、出版社/期刊、卷期、出版年份及起始页码等非空字段。
-+- 自定义示例：
-+  ```bash
-+  export FILENAME_TEMPLATE="{authors} - {title} ({publication_date})"
-+  python gemini_file_renamer.py
-+  ```
-+
-
-
-+## 配额与速率限制
-+- 默认每分钟请求数 (RPM) 与令牌数 (TPM) 会在调用前检查；每日总请求记录在 `request_tracker.json`。
-+- 发生超额或 API 失败时会自动重试并指数退避。
-+
-
-
-+## 文本提取范围
-+- 默认：PDF 提取前 4 页和后 3 页；DOCX 提取前 20 段与后 15 段；EPUB/AZW3 提取前 5 章与后 4 章。
-+- 可在脚本中调整这些数量以适配具体文档。
-+
-
-
-+## 常见提示
-+- 如需更高质量，可将模型从 `gemini-2.5-flash` 替换为 `gemini-2.5-pro`（速度较慢）。
-+- 批处理前建议备份重要文件，并确保输出目录有足够的写入权限。

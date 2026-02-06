@@ -5,4 +5,4 @@ pathvalidate
 PyMuPDF
 python-docx
 tqdm
-
+customtkinter

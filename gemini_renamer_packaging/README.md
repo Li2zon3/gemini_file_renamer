@@ -67,6 +67,7 @@ python build_app.py
 ```powershell
 pyinstaller --onefile --windowed --name=GeminiRenamer `
     --hidden-import=google.generativeai `
+    --hidden-import=customtkinter `
     --hidden-import=pymupdf `
     --hidden-import=fitz `
     --hidden-import=docx `
@@ -74,6 +75,7 @@ pyinstaller --onefile --windowed --name=GeminiRenamer `
     --hidden-import=bs4 `
     --hidden-import=pathvalidate `
     --collect-submodules=google.generativeai `
+    --collect-submodules=customtkinter `
     --collect-submodules=ebooklib `
     gemini_file_renamer_gui.py
 ```
@@ -85,6 +87,7 @@ pyinstaller --onefile --windowed --name=GeminiRenamer `
 pyinstaller --onefile --windowed --name=GeminiRenamer \
     --osx-bundle-identifier=com.gemini.renamer \
     --hidden-import=google.generativeai \
+    --hidden-import=customtkinter \
     --hidden-import=pymupdf \
     --hidden-import=fitz \
     --hidden-import=docx \
@@ -92,6 +95,7 @@ pyinstaller --onefile --windowed --name=GeminiRenamer \
     --hidden-import=bs4 \
     --hidden-import=pathvalidate \
     --collect-submodules=google.generativeai \
+    --collect-submodules=customtkinter \
     --collect-submodules=ebooklib \
     gemini_file_renamer_gui.py
 
