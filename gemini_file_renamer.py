@@ -217,6 +217,7 @@ PROMPTS = {
         "Each document starts with a \"--- START OF FILE: [filename] ---\" marker and ends with "
         "an \"--- END OF FILE: [filename] ---\" marker.\n"
         "For EACH document provided, extract its metadata. Also extract a list of 3-5 relevant keywords.\n"
+        "Do not use generic placeholder titles like \"Metadata Extraction Task\". If uncertain, return an empty title string.\n"
         "Return a single JSON array containing all the extracted JSON objects.\n"
         "The order of objects in the final list MUST match the order of the documents in the input text.\n"
         "Do not add any commentary. Only return the JSON array."
@@ -225,6 +226,7 @@ PROMPTS = {
         "Analyze the text from the following document to extract its metadata.\n"
         "Based on the content, provide a JSON object with the following details.\n"
         "Also extract a list of 3-5 relevant keywords from the document's content.\n"
+        "Do not use generic placeholder titles like \"Metadata Extraction Task\". If uncertain, return an empty title string.\n"
         "Do not add any commentary. Only return the JSON object."
     )
 }
@@ -991,6 +993,36 @@ class TextNormalizer:
         return normalized
 
 
+# ============================================================================
+# Placeholder title detection (avoid generic names like "Metadata Extraction Task")
+# ============================================================================
+
+_PLACEHOLDER_TITLE_EXACT = "metadata extraction task"
+_PLACEHOLDER_TITLE_MAX_LEN = 80  # avoid false positives on long real titles
+
+
+def is_placeholder_title(title: object) -> bool:
+    """
+    Detect obvious placeholder / generic titles that should never be used as filenames.
+    """
+    if not isinstance(title, str):
+        return False
+    value = title.strip()
+    if not value:
+        return False
+    lowered = value.casefold()
+    if lowered == _PLACEHOLDER_TITLE_EXACT:
+        return True
+    # Low-risk heuristic: contains both "metadata extraction" and "task" and is short.
+    if (
+        len(lowered) <= _PLACEHOLDER_TITLE_MAX_LEN
+        and "metadata extraction" in lowered
+        and "task" in lowered
+    ):
+        return True
+    return False
+
+
 class MetadataBuilder:
     def __init__(self, info: Dict[str, Any]):
         self._info = info
@@ -1044,9 +1076,12 @@ class MetadataBuilder:
         return " | ".join(details)
 
     def build_filename(self) -> Optional[str]:
-        if not self.title:
+        title = self.title
+        if not title:
             return None
-        main_part = f"{self.title} - {self.authors_str}" if self.authors_str else self.title
+        if is_placeholder_title(title):
+            return None
+        main_part = f"{title} - {self.authors_str}" if self.authors_str else title
         extras = []
         if self.translators:
             extras.append(f"{self.translators} 译")
@@ -1164,16 +1199,23 @@ class FileRenamer:
         self._write_metadata = write_metadata
         self._executor = ThreadPoolExecutor(max_workers=4)
 
-    async def process(self, path: Path, info: Dict[str, Any]) -> None:
+    async def process(self, path: Path, info: Dict[str, Any]) -> bool:
+        if not isinstance(info, dict):
+            logger.warning(f"返回结果不是 JSON 对象，无法构建文件名: {path.name}")
+            return False
+
         builder = MetadataBuilder(info)
         new_name = builder.build_filename()
         if not new_name:
-            logger.warning(f"无法构建文件名: {path.name}")
-            return
+            if is_placeholder_title(builder.title):
+                logger.warning(f"检测到占位标题，拒绝重命名并进入 pending: {path.name}")
+            else:
+                logger.warning(f"无法构建文件名: {path.name}")
+            return False
         safe_name = sanitize_filename(new_name).strip()
         if not safe_name or safe_name in {".", ".."}:
             logger.warning(f"非法文件名: {new_name}")
-            return
+            return False
         new_path = path.with_name(f"{safe_name}{path.suffix}")
         counter = 1
         while new_path.exists() and new_path != path:
@@ -1185,13 +1227,14 @@ class FileRenamer:
                 logger.info(f"重命名: {path.name} -> {new_path.name}")
             except OSError as e:
                 logger.error(f"重命名失败 {path.name}: {e}")
-                return
+                return False
         else:
             # 文件名没变，仍然写入元数据
             new_path = path
 
         if self._write_metadata:
             await self._write_metadata_async(new_path, builder)
+        return True
 
     async def _write_metadata_async(self, path: Path, builder: MetadataBuilder) -> None:
         writer = MetadataWriterFactory.get_writer(path.suffix)
@@ -1381,11 +1424,17 @@ class FileProcessor:
                     pbar.update(len(batch.items))
                     return BatchResult(success=False, failed_items=list(batch.items))
 
+                failed_items: List[FileItem] = []
                 for item, info in zip(batch.items, results):
-                    await self._renamer.process(item.path, info)
+                    ok = await self._renamer.process(item.path, info)
+                    if not ok:
+                        failed_items.append(item)
 
                 pbar.update(len(batch.items))
-                return BatchResult(success=True)
+                return BatchResult(
+                    success=(len(failed_items) == 0),
+                    failed_items=failed_items,
+                )
 
             except json.JSONDecodeError as e:
                 logger.error(f"JSON 解析失败: {e}")
@@ -1481,9 +1530,11 @@ class FileProcessor:
                     return SingleResult(success=False, failed_item=item)
 
                 info = json.loads(response_text)
-                await self._renamer.process(item.path, info)
+                ok = await self._renamer.process(item.path, info)
                 pbar.update(1)
-                return SingleResult(success=True)
+                if ok:
+                    return SingleResult(success=True)
+                return SingleResult(success=False, failed_item=item)
 
             except json.JSONDecodeError as e:
                 logger.error(f"JSON 解析失败 {item.path.name}: {e}")
@@ -1783,26 +1834,116 @@ class Application:
         # [FIX] return_exceptions=True 防止单个失败导致整体崩溃
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
+        retry_candidates: List[FileItem] = []
+        quota_exceeded = False
+        budget_exceeded = False
+        enable_single_retry = not (self._paid_economy_mode and paid_ctx is not None)
+
         for i, result in enumerate(results):
+            batch = batches_to_process[i]
+            batch_size = len(batch.items)
+
             if isinstance(result, Exception):
                 logger.error(f"批次 {i} 发生异常: {result}")
-                remaining.extend(batches_to_process[i].items)
-                self._stats.total_failed += len(batches_to_process[i].items)
+                remaining.extend(batch.items)
+                self._stats.total_failed += batch_size
                 if is_quota_error(result):
+                    quota_exceeded = True
                     # 将后续未处理的批次加入剩余
                     for j in range(i + 1, len(batches_to_process)):
                         remaining.extend(batches_to_process[j].items)
                     break
-            elif result.success:
-                self._stats.total_processed += len(batches_to_process[i].items)
+                continue
+
+            failed_items = list(result.failed_items or [])
+            failed_count = len(failed_items)
+            succeeded_count = batch_size - failed_count
+            if succeeded_count > 0:
+                self._stats.total_processed += succeeded_count
+
+            if result.budget_exceeded:
+                # Budget exhausted for this key in paid phase: keep items for later stages.
+                budget_exceeded = True
+                remaining.extend(failed_items)
+                continue
+
+            if failed_count == 0:
+                continue
+
+            if result.quota_exceeded:
+                quota_exceeded = True
+                remaining.extend(failed_items)
+                self._stats.total_failed += failed_count
+                for j in range(i + 1, len(batches_to_process)):
+                    remaining.extend(batches_to_process[j].items)
+                break
+
+            # Partial failures in a batch: speed-first single-file retry (unless economy mode).
+            if enable_single_retry and 0 < failed_count < batch_size:
+                retry_candidates.extend(failed_items)
             else:
-                remaining.extend(result.failed_items)
-                if not result.budget_exceeded:
-                    self._stats.total_failed += len(result.failed_items)
-                if result.quota_exceeded:
-                    for j in range(i + 1, len(batches_to_process)):
-                        remaining.extend(batches_to_process[j].items)
-                    break
+                remaining.extend(failed_items)
+                self._stats.total_failed += failed_count
+
+        if (
+            enable_single_retry
+            and retry_candidates
+            and not quota_exceeded
+            and not (paid_ctx is not None and budget_exceeded)
+        ):
+            # Do not exceed daily request quota. Each single retry consumes 1 request.
+            requests_left = self._key_manager.get_remaining_quota(api_key, config.daily_request_limit)
+            if requests_left <= 0:
+                remaining.extend(retry_candidates)
+                self._stats.total_failed += len(retry_candidates)
+            else:
+                seen: set[FileItem] = set()
+                unique_retry: List[FileItem] = []
+                for it in retry_candidates:
+                    if it in seen:
+                        continue
+                    seen.add(it)
+                    unique_retry.append(it)
+
+                to_retry = unique_retry[:requests_left]
+                not_retried = unique_retry[requests_left:]
+                if not_retried:
+                    remaining.extend(not_retried)
+                    self._stats.total_failed += len(not_retried)
+
+                if to_retry:
+                    logger.warning(
+                        f"批处理部分文件失败，将以单文件模式自动重试 {len(to_retry)} 个文件（速度优先）。"
+                    )
+
+                    class _NullPbar:
+                        def update(self, n: int = 1) -> None:
+                            return
+
+                    null_pbar = _NullPbar()
+                    retry_semaphore = asyncio.Semaphore(config.concurrency_limit)
+
+                    async def retry_one(it: FileItem) -> Tuple[FileItem, SingleResult]:
+                        async with retry_semaphore:
+                            try:
+                                r = await processor.process_single(it, null_pbar, paid_ctx=paid_ctx)
+                            except Exception as e:
+                                logger.error(f"单文件重试发生异常 {it.path.name}: {e}")
+                                return it, SingleResult(success=False, failed_item=it)
+                            if not r.budget_exceeded:
+                                self._key_manager.increment_usage(api_key)
+                            return it, r
+
+                    retry_tasks = [retry_one(it) for it in to_retry]
+                    retry_results = await asyncio.gather(*retry_tasks)
+
+                    for it, r in retry_results:
+                        if r.success:
+                            self._stats.total_processed += 1
+                            continue
+                        remaining.append(r.failed_item or it)
+                        if not r.budget_exceeded:
+                            self._stats.total_failed += 1
 
         return remaining
 

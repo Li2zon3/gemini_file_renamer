@@ -28,6 +28,12 @@
   - `--mode single`: one file per request (concurrent)
   - `--mode auto`: choose single vs batch automatically (speed-first)
 
+### Placeholder Title Protection
+- If Gemini returns a generic placeholder title like `Metadata Extraction Task`, the tool will reject it:
+  - No rename, no metadata write
+  - The file stays in `pending_files.txt` for later retry
+- In batch mode, partial failures may be auto-retried in single mode (speed-first). In paid tier economy mode (`--paid-economy`), this auto-retry is disabled to reduce cost.
+
 ### Paid Tier (Gemini 3 Flash Preview)
 - Enable paid tier (defaults: `$10/Key/month`, model `gemini-3-flash-preview`, context hard cap 200k):
   ```bash
@@ -106,6 +112,12 @@
   - `--mode single`：单文件请求（并发）
   - `--mode auto`：自动选择（速度优先：少量文件单文件并发，大量文件批处理）
 
+### 占位标题保护（避免误命名）
+- 若模型返回泛化/占位标题（例如 `Metadata Extraction Task`），程序会拒绝该结果：
+  - 不重命名、不写元数据
+  - 文件会保留在 `pending_files.txt`，方便后续重试
+- 批处理模式下若出现“部分失败”，程序可能自动降级为单文件重试（速度优先）。在付费省钱模式（`--paid-economy`）下会禁用该自动重试以降低成本。
+
 ### 付费模式（Gemini 3 Flash Preview）
 - 开启付费模式（默认：`$10/Key/月`，模型 `gemini-3-flash-preview`，上下文硬上限 200k）：
   ```bash
@@ -151,4 +163,3 @@
 ## 安全与隐私
 - 程序不会把 API key 写入磁盘。
 - 各种 tracker 只保存 `key_id`（sha256 前缀），不保存明文 key。
-

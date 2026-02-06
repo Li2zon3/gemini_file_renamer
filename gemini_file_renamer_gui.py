@@ -443,6 +443,29 @@ def _normalize(value):
     return text
 
 
+# --- 占位标题检测（避免误命名为 "Metadata Extraction Task" 等泛化标题） ---
+_PLACEHOLDER_TITLE_EXACT = "metadata extraction task"
+_PLACEHOLDER_TITLE_MAX_LEN = 80
+
+
+def is_placeholder_title(title):
+    if not isinstance(title, str):
+        return False
+    value = title.strip()
+    if not value:
+        return False
+    lowered = value.casefold()
+    if lowered == _PLACEHOLDER_TITLE_EXACT:
+        return True
+    if (
+        len(lowered) <= _PLACEHOLDER_TITLE_MAX_LEN
+        and "metadata extraction" in lowered
+        and "task" in lowered
+    ):
+        return True
+    return False
+
+
 def _normalize_role(value):
     """规范化角色字段（译者、编者等）"""
     normalized = _normalize(value)
@@ -622,6 +645,7 @@ class Backend:
             "an \"--- END OF FILE: [filename] ---\" marker.\n"
             "For EACH document provided, extract its metadata and create a corresponding JSON object.\n"
             "Also extract a list of 3-5 relevant keywords from each document's content.\n"
+            "Do not use generic placeholder titles like \"Metadata Extraction Task\". If uncertain, return an empty title string.\n"
             "Return a single JSON array (a list) containing all the extracted JSON objects.\n"
             "The order of objects in the final list MUST match the order of the documents in the input text.\n"
             "Do not add any commentary. Only return the JSON array."
@@ -630,6 +654,7 @@ class Backend:
             "Analyze the following text from a single document.\n"
             "Extract its metadata and create a corresponding JSON object.\n"
             "Also extract a list of 3-5 relevant keywords.\n"
+            "Do not use generic placeholder titles like \"Metadata Extraction Task\". If uncertain, return an empty title string.\n"
             "Return only the single JSON object. Do not add any commentary."
         )
         self.SINGLE_OBJECT_SCHEMA = {
@@ -885,6 +910,8 @@ class Backend:
             return None
 
         title = _normalize(info.get('title', '')).strip()
+        if is_placeholder_title(title):
+            return None
         authors = _normalize_authors(info.get('authors'))
         authors_str = "、".join(authors).strip() or "作者不详"
         translators = _normalize_role(info.get('translators'))
@@ -1084,9 +1111,25 @@ class Backend:
                     return {"success": False}
 
                 info = json.loads(response.text)
+                new_base_name = self.build_filename(info) if isinstance(info, dict) else None
+                if not new_base_name:
+                    title = _normalize(info.get("title")) if isinstance(info, dict) else ""
+                    if is_placeholder_title(title):
+                        self.log_to_gui(
+                            f"检测到占位标题，拒绝重命名并进入 pending: {file_item['path'].name}",
+                            "WARNING",
+                        )
+                    else:
+                        self.log_to_gui(
+                            f"无法构建有效文件名，已跳过: {file_item['path'].name}",
+                            "WARNING",
+                        )
+                    self.gui_queue.put(("progress_update", 1))
+                    return {"success": False}
+
                 self.rename_file(
                     file_item["path"],
-                    self.build_filename(info),
+                    new_base_name,
                     info=info,
                     write_metadata=write_metadata,
                 )
@@ -1256,12 +1299,23 @@ class Backend:
                         )
                         return {'success': False, 'failed_items': batch}
 
-                    for i, info in enumerate(results):
-                        self.rename_file(batch[i]['path'], self.build_filename(info),
-                                         info=info, write_metadata=write_metadata)
+                    failed_items = []
+                    for item, info in zip(batch, results):
+                        new_base_name = self.build_filename(info) if isinstance(info, dict) else None
+                        if not new_base_name:
+                            failed_items.append(item)
+                            continue
+                        self.rename_file(
+                            item['path'],
+                            new_base_name,
+                            info=info,
+                            write_metadata=write_metadata,
+                        )
 
-                    self.gui_queue.put(("progress_update", len(batch)))
-                    return {'success': True, 'failed_items': []}
+                    success_count = max(0, len(batch) - len(failed_items))
+                    if success_count:
+                        self.gui_queue.put(("progress_update", success_count))
+                    return {'success': len(failed_items) == 0, 'failed_items': failed_items}
 
                 except Exception as e:
                     if paid_ctx is not None and reservation is not None and not committed:
@@ -1617,14 +1671,18 @@ class Backend:
                                     if "quota" in str(result).lower() or "429" in str(result):
                                         quota_exceeded = True
                                 elif isinstance(result, dict):
-                                    if result.get("success"):
-                                        for item in batches_to_process[i]:
+                                    failed_items = result.get("failed_items", []) or []
+                                    failed_paths = {it.get("path") for it in failed_items if isinstance(it, dict)}
+
+                                    # Support partial success: mark succeeded items in this batch.
+                                    for item in batches_to_process[i]:
+                                        if item.get("path") not in failed_paths:
                                             successfully_processed_paths.add(item["path"])
-                                    else:
+
+                                    if not result.get("success"):
                                         if result.get("budget_exceeded"):
                                             budget_exceeded = True
                                             continue
-                                        failed_items = result.get("failed_items", [])
                                         if result.get("quota_exceeded"):
                                             quota_exceeded = True
                                         else:
